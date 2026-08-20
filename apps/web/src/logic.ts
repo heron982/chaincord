@@ -33,6 +33,63 @@ export function trackLooksLive(track: {
   return Boolean(track && track.readyState === "live" && track.enabled && !track.muted);
 }
 
+export function isWebKitEngine(ua = typeof navigator === "undefined" ? "" : navigator.userAgent): boolean {
+  return /AppleWebKit/i.test(ua) && !/Chrome|Chromium|Edg\//i.test(ua);
+}
+
+export function webkitSafeIceUrl(url: string): boolean {
+  if (!url.startsWith("stun:") && !url.startsWith("turn:")) return false;
+  if (url.startsWith("turns:")) return false;
+  return !url.includes("?");
+}
+
+export function rtcIceServersFor(servers: RTCIceServer[], webkit: boolean): RTCIceServer[] {
+  if (!webkit) return servers;
+  const out: RTCIceServer[] = [];
+  for (const server of servers) {
+    const urls = (Array.isArray(server.urls) ? server.urls : [server.urls]).filter(webkitSafeIceUrl);
+    if (!urls.length) continue;
+    out.push({
+      ...server,
+      urls: urls.length === 1 ? urls[0] : urls,
+    });
+  }
+  return out;
+}
+
+export function rtcPeerConfigs(servers: RTCIceServer[], webkit: boolean): RTCConfiguration[] {
+  const safe = rtcIceServersFor(servers, webkit);
+  const stun = safe.filter((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.every((url) => url.startsWith("stun:"));
+  });
+  const configs: RTCConfiguration[] = [];
+  if (!webkit) configs.push({ iceServers: servers, bundlePolicy: "max-bundle" });
+  if (safe.length) {
+    configs.push({ iceServers: safe, bundlePolicy: "max-bundle" });
+    configs.push({ iceServers: safe });
+  }
+  if (stun.length) configs.push({ iceServers: stun });
+  configs.push({});
+  return configs;
+}
+
+export function createRtcPeerConnection(
+  Ctor: (new (config?: RTCConfiguration) => RTCPeerConnection) | undefined,
+  configs: RTCConfiguration[],
+): { ok: true; pc: RTCPeerConnection } | { ok: false; error: string } {
+  if (!Ctor) return { ok: false, error: "RTCPeerConnection ausente no webview" };
+  let last = "falhou ao abrir o enlace";
+  for (const config of configs) {
+    try {
+      return { ok: true, pc: new Ctor(config) };
+    } catch (err) {
+      last = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return { ok: false, error: last };
+}
+
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${Math.max(0, Math.round(n))} B`;
   if (n < 1024 * 1024) {

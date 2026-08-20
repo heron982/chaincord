@@ -77,6 +77,15 @@ fn get_history(app: tauri::AppHandle) -> Vec<peer::UiMessage> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WEBKIT_DISABLE_SANDBOX").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_SANDBOX", "1");
+        }
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
     tauri::Builder::default()
         .manage(Arc::new(AppState::new()))
         .invoke_handler(tauri::generate_handler![
@@ -102,7 +111,11 @@ pub fn run() {
                 }
             });
             if let Some(window) = app.get_webview_window("main") {
-                allow_media(window);
+                allow_media(&window);
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = window.reload();
+                }
             }
             Ok(())
         })
@@ -115,7 +128,7 @@ pub fn run() {
         .expect("erro ao abrir o Chaincord");
 }
 
-fn allow_media(window: WebviewWindow) {
+fn allow_media(window: &WebviewWindow) {
     #[cfg(windows)]
     {
         let _ = window.with_webview(|webview| {
@@ -151,12 +164,15 @@ fn allow_media(window: WebviewWindow) {
     {
         let _ = window.with_webview(|webview| {
             use webkit2gtk::glib::prelude::*;
-            use webkit2gtk::{PermissionRequestExt, SettingsExt, WebViewExt};
+            use webkit2gtk::{PermissionRequestExt, SettingsExt, WebContextExt, WebViewExt};
             let view = webview.inner();
             if let Some(settings) = view.settings() {
                 settings.set_enable_media_stream(true);
                 settings.set_enable_webrtc(true);
                 settings.set_media_playback_requires_user_gesture(false);
+            }
+            if let Some(ctx) = view.context() {
+                ctx.set_sandbox_enabled(false);
             }
             view.connect_permission_request(|_, request| {
                 if request.is::<webkit2gtk::UserMediaPermissionRequest>() {
