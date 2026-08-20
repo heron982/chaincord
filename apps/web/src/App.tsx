@@ -570,9 +570,23 @@ export function App() {
   }, [screenOn, selected]);
 
   if (!state) {
+    const inApp = Boolean(
+      (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__,
+    );
     return (
       <div className="setup-screen">
-        <p className="muted">Abrindo…</p>
+        {inApp ? (
+          <p className="muted">Abrindo…</p>
+        ) : (
+          <div className="panel">
+            <h2>Isso não é o app</h2>
+            <p className="muted">
+              Esta aba do browser só tem a interface. O núcleo (convite, chat, call) vive na janela
+              nativa. Feche esta aba e use o Chaincord que o <code>tauri:dev</code> abre, ou o
+              <code>.exe</code>.
+            </p>
+          </div>
+        )}
       </div>
     );
   }

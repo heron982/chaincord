@@ -17,6 +17,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    host: "127.0.0.1",
     port: Number(process.env.CHAINCORD_UI_PORT ?? 1420),
     strictPort: true,
   },
