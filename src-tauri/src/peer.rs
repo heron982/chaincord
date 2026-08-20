@@ -119,6 +119,8 @@ pub struct AppState {
     pending: AtomicU64,
     relay_gen: AtomicU64,
     seen: Mutex<(HashSet<u64>, VecDeque<u64>)>,
+    #[cfg(target_os = "linux")]
+    pub rtc: std::sync::Arc<crate::rtc::RtcHub>,
 }
 
 impl AppState {
@@ -153,6 +155,8 @@ impl AppState {
             pending: AtomicU64::new(1),
             relay_gen: AtomicU64::new(0),
             seen: Mutex::new((HashSet::new(), VecDeque::new())),
+            #[cfg(target_os = "linux")]
+            rtc: std::sync::Arc::new(crate::rtc::RtcHub::new()),
         }
     }
 
@@ -208,6 +212,11 @@ impl AppState {
             seed_active: seeding_visible(&inner),
             seeding: inner.seeding.iter().cloned().collect(),
         }
+    }
+
+    pub fn voice_flags(&self) -> (bool, bool) {
+        let inner = self.inner.lock().expect("state");
+        (inner.muted, inner.deafened)
     }
 }
 

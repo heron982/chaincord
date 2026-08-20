@@ -100,6 +100,26 @@ export async function backendSendRtc(frame: RtcFrame): Promise<void> {
   await invoke("send_signal", { frame });
 }
 
+export function rtcPeerConnectionMissing(): boolean {
+  return typeof RTCPeerConnection === "undefined";
+}
+
+export async function backendRtcStart(room: string, me: string): Promise<void> {
+  await invoke("rtc_start", { room, me });
+}
+
+export async function backendRtcStop(): Promise<void> {
+  await invoke("rtc_stop");
+}
+
+export async function backendRtcSync(peers: string[]): Promise<void> {
+  await invoke("rtc_sync", { peers });
+}
+
+export async function backendRtcSignal(frame: RtcFrame): Promise<void> {
+  await invoke("rtc_signal", { frame });
+}
+
 export function backendSubscribe(handlers: {
   onState: (s: UiState) => void;
   onMessage: (m: UiMessage) => void;

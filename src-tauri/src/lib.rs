@@ -3,6 +3,8 @@ mod nat;
 mod peer;
 mod relay;
 mod store;
+#[cfg(target_os = "linux")]
+mod rtc;
 
 use peer::{AppState, UiState};
 use std::sync::Arc;
@@ -47,6 +49,60 @@ fn leave_call(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn send_signal(frame: serde_json::Value, app: tauri::AppHandle) -> Result<(), String> {
     peer::send_signal(&app, frame)
+}
+
+#[tauri::command]
+async fn rtc_start(room: String, me: String, app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::rtc::start(&app, room, me).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (room, me, app);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn rtc_stop(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::rtc::stop(&app).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn rtc_sync(peers: Vec<String>, app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::rtc::sync(&app, peers).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (peers, app);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn rtc_signal(frame: serde_json::Value, app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let parsed: crate::rtc::RtcFrameIn =
+            serde_json::from_value(frame).map_err(|e| e.to_string())?;
+        crate::rtc::handle(&app, parsed).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (frame, app);
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -97,6 +153,10 @@ pub fn run() {
             join_call,
             leave_call,
             send_signal,
+            rtc_start,
+            rtc_stop,
+            rtc_sync,
+            rtc_signal,
             leave_community,
             save_profile,
             publish_presence,
@@ -112,10 +172,6 @@ pub fn run() {
             });
             if let Some(window) = app.get_webview_window("main") {
                 allow_media(&window);
-                #[cfg(target_os = "linux")]
-                {
-                    let _ = window.reload();
-                }
             }
             Ok(())
         })
@@ -164,16 +220,13 @@ fn allow_media(window: &WebviewWindow) {
     {
         let _ = window.with_webview(|webview| {
             use webkit2gtk::glib::prelude::*;
-            use webkit2gtk::{PermissionRequestExt, SettingsExt, WebContextExt, WebViewExt};
+            use webkit2gtk::{PermissionRequestExt, Settings, SettingsExt, WebViewExt};
             let view = webview.inner();
-            if let Some(settings) = view.settings() {
-                settings.set_enable_media_stream(true);
-                settings.set_enable_webrtc(true);
-                settings.set_media_playback_requires_user_gesture(false);
-            }
-            if let Some(ctx) = view.context() {
-                ctx.set_sandbox_enabled(false);
-            }
+            let settings = view.settings().unwrap_or_else(Settings::new);
+            settings.set_enable_media_stream(true);
+            settings.set_enable_webrtc(true);
+            settings.set_media_playback_requires_user_gesture(false);
+            view.set_settings(&settings);
             view.connect_permission_request(|_, request| {
                 if request.is::<webkit2gtk::UserMediaPermissionRequest>() {
                     request.allow();
@@ -181,6 +234,11 @@ fn allow_media(window: &WebviewWindow) {
                 }
                 false
             });
+            if settings.enables_webrtc() {
+                view.reload_bypass_cache();
+            } else {
+                eprintln!("chaincord: WebKit recusou enable-webrtc");
+            }
         });
     }
 }

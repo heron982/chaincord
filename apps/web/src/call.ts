@@ -1,3 +1,11 @@
+import { listen } from "@tauri-apps/api/event";
+import {
+  backendRtcSignal,
+  backendRtcStart,
+  backendRtcStop,
+  backendRtcSync,
+  rtcPeerConnectionMissing,
+} from "./backend";
 import {
   callPathMode,
   canPublishLocalSdp,
@@ -99,6 +107,9 @@ export class CallNet {
   private pathMode: CallPathMode = "1:1";
   private rtcFailed: string | null = null;
   private traceSeq = 0;
+  private native = rtcPeerConnectionMissing();
+  private nativeUnsub: Array<() => void> = [];
+  private nativeReady: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly me: string,
@@ -109,9 +120,31 @@ export class CallNet {
     private readonly onLink: (link: CallLink) => void,
     private readonly onLog: (line: CallTrace) => void,
   ) {
-    this.timer = window.setInterval(() => void this.emitLink(), 1000);
     this.trace("call iniciada", "info");
+    if (this.native) {
+      this.nativeReady = this.bootNative();
+      return;
+    }
+    this.timer = window.setInterval(() => void this.emitLink(), 1000);
     void this.emitLink();
+  }
+
+  private async bootNative() {
+    try {
+      this.nativeUnsub.push(
+        await listen<CallTrace>("ui-call-trace", (e) => this.onLog(e.payload)),
+      );
+      this.nativeUnsub.push(
+        await listen<CallLink>("ui-call-link", (e) => this.onLink(e.payload)),
+      );
+      await backendRtcStart(this.room, this.me);
+      if (this.stopped) {
+        await backendRtcStop();
+      }
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      this.trace(`neste app: ${why}`, "err");
+    }
   }
 
   private currentMode(): CallPathMode {
@@ -140,6 +173,7 @@ export class CallNet {
 
   setCamera(stream: MediaStream | null) {
     this.cam = stream;
+    if (this.native) return;
     void this.pushLocal().then(() => this.kickImpoliteOffers());
   }
 
@@ -147,12 +181,21 @@ export class CallNet {
     const track = stream?.getVideoTracks()[0];
     if (track) track.contentHint = "detail";
     this.screen = stream;
+    if (this.native) return;
     void this.pushLocal();
     window.setTimeout(() => void this.pushLocal(), 200);
   }
 
   sync(peers: string[]) {
     if (this.stopped) return;
+    if (this.native) {
+      void this.nativeReady
+        .then(() => backendRtcSync(peers.filter((p) => p && p !== this.me)))
+        .catch((err) => {
+          this.trace(`neste app: ${String(err)}`, "err");
+        });
+      return;
+    }
     const want = new Set(peers.filter((p) => p && p !== this.me));
     for (const id of [...this.pcs.keys()]) {
       if (!want.has(id)) this.drop(id);
@@ -166,7 +209,7 @@ export class CallNet {
           const why = err instanceof Error ? err.message : String(err);
           if (this.rtcFailed !== why) {
             this.rtcFailed = why;
-            this.trace(`WebRTC: ${why}`, "err", id);
+            this.trace(`neste app: ${why}`, "err");
           }
           continue;
         }
@@ -179,6 +222,13 @@ export class CallNet {
 
   async handle(frame: RtcFrame) {
     if (this.stopped) return;
+    if (this.native) {
+      await this.nativeReady;
+      await backendRtcSignal(frame).catch((err) => {
+        this.trace(`neste app: ${String(err)}`, "err");
+      });
+      return;
+    }
     if (frame.room !== this.room) return;
     if (frame.from === this.me) return;
     if (frame.to !== this.me) return;
@@ -192,6 +242,12 @@ export class CallNet {
   stop() {
     this.trace("call encerrada", "info");
     this.stopped = true;
+    if (this.native) {
+      for (const unsub of this.nativeUnsub) unsub();
+      this.nativeUnsub = [];
+      void backendRtcStop();
+      return;
+    }
     if (this.timer != null) {
       window.clearInterval(this.timer);
       this.timer = null;
