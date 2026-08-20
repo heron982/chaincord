@@ -1,0 +1,143 @@
+mod crypto;
+mod nat;
+mod peer;
+mod relay;
+mod store;
+
+use peer::{AppState, UiState};
+use std::sync::Arc;
+use tauri::{Manager, WebviewWindow};
+
+#[tauri::command]
+fn get_state(state: tauri::State<Arc<AppState>>) -> UiState {
+    state.snapshot()
+}
+
+#[tauri::command]
+fn create_community(name: String, app: tauri::AppHandle) -> Result<(), String> {
+    peer::create_local(&app, &name);
+    Ok(())
+}
+
+#[tauri::command]
+fn join_community(invite: String, app: tauri::AppHandle) -> Result<(), String> {
+    peer::join_community(&app, &invite)
+}
+
+#[tauri::command]
+fn send_chat(text: String, channel: Option<String>, app: tauri::AppHandle) -> Result<(), String> {
+    peer::send_chat(&app, &text, channel.as_deref().unwrap_or("general"))
+}
+
+#[tauri::command]
+fn add_room(kind: String, name: String, app: tauri::AppHandle) -> Result<(), String> {
+    peer::add_room(&app, &kind, &name)
+}
+
+#[tauri::command]
+fn join_call(room: String, app: tauri::AppHandle) -> Result<(), String> {
+    peer::join_call(&app, &room)
+}
+
+#[tauri::command]
+fn leave_call(app: tauri::AppHandle) -> Result<(), String> {
+    peer::leave_call(&app)
+}
+
+#[tauri::command]
+fn send_signal(frame: serde_json::Value, app: tauri::AppHandle) -> Result<(), String> {
+    peer::send_signal(&app, frame)
+}
+
+#[tauri::command]
+fn leave_community(app: tauri::AppHandle) -> Result<(), String> {
+    peer::leave_community(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn save_profile(display_name: String, avatar: String, app: tauri::AppHandle) -> Result<(), String> {
+    peer::save_profile(&app, &display_name, &avatar)
+}
+
+#[tauri::command]
+fn publish_presence(
+    muted: bool,
+    deafened: bool,
+    status: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    peer::publish_presence(&app, muted, deafened, status.as_deref())
+}
+
+#[tauri::command]
+fn get_history(app: tauri::AppHandle) -> Vec<peer::UiMessage> {
+    peer::get_history(&app)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .manage(Arc::new(AppState::new()))
+        .invoke_handler(tauri::generate_handler![
+            get_state,
+            create_community,
+            join_community,
+            send_chat,
+            add_room,
+            join_call,
+            leave_call,
+            send_signal,
+            leave_community,
+            save_profile,
+            publish_presence,
+            get_history
+        ])
+        .setup(|app| {
+            peer::boot(app.handle());
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = peer::run_listener(handle).await {
+                    eprintln!("listener: {err}");
+                }
+            });
+            if let Some(window) = app.get_webview_window("main") {
+                allow_media(window);
+            }
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("erro ao abrir o Chaincord");
+}
+
+fn allow_media(window: WebviewWindow) {
+    #[cfg(windows)]
+    {
+        let _ = window.with_webview(|webview| {
+            use webview2_com::{
+                Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+                PermissionRequestedEventHandler,
+            };
+            unsafe {
+                let Ok(core) = webview.controller().CoreWebView2() else {
+                    return;
+                };
+                let mut token = 0_i64;
+                let _ = core.add_PermissionRequested(
+                    &PermissionRequestedEventHandler::create(Box::new(|_, args| {
+                        let Some(args) = args else {
+                            return Ok(());
+                        };
+                        let _ = args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+                        Ok(())
+                    })),
+                    &mut token,
+                );
+            }
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+    }
+}

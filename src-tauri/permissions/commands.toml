@@ -1,0 +1,59 @@
+[[permission]]
+identifier = "allow-get-state"
+description = "Ler estado da UI"
+commands.allow = ["get_state"]
+
+[[permission]]
+identifier = "allow-create-community"
+description = "Criar comunidade"
+commands.allow = ["create_community"]
+
+[[permission]]
+identifier = "allow-join-community"
+description = "Entrar com convite"
+commands.allow = ["join_community"]
+
+[[permission]]
+identifier = "allow-send-chat"
+description = "Enviar mensagem ao vivo"
+commands.allow = ["send_chat"]
+
+[[permission]]
+identifier = "allow-leave-community"
+description = "Sair da comunidade"
+commands.allow = ["leave_community"]
+
+[[permission]]
+identifier = "allow-add-room"
+description = "Criar canal ou sala de chamada"
+commands.allow = ["add_room"]
+
+[[permission]]
+identifier = "allow-join-call"
+description = "Entrar numa sala de chamada"
+commands.allow = ["join_call"]
+
+[[permission]]
+identifier = "allow-leave-call"
+description = "Sair da sala de chamada"
+commands.allow = ["leave_call"]
+
+[[permission]]
+identifier = "allow-send-signal"
+description = "Sinalizacao WebRTC"
+commands.allow = ["send_signal"]
+
+[[permission]]
+identifier = "allow-save-profile"
+description = "Salvar nome e foto do perfil"
+commands.allow = ["save_profile"]
+
+[[permission]]
+identifier = "allow-publish-presence"
+description = "Publicar nome, foto e mudo na call"
+commands.allow = ["publish_presence"]
+
+[[permission]]
+identifier = "allow-get-history"
+description = "Ler historico local do chat"
+commands.allow = ["get_history"]

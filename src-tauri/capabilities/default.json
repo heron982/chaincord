@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Janela principal",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "allow-get-state",
+    "allow-create-community",
+    "allow-join-community",
+    "allow-send-chat",
+    "allow-leave-community",
+    "allow-add-room",
+    "allow-join-call",
+    "allow-leave-call",
+    "allow-send-signal",
+    "allow-save-profile",
+    "allow-publish-presence",
+    "allow-get-history"
+  ]
+}

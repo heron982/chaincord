@@ -1,0 +1,40 @@
+[package]
+name = "chaincord"
+version = "0.1.0"
+description = "Live chat descentralizado"
+authors = ["chaincord"]
+edition = "2021"
+
+[lib]
+name = "chaincord_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
+local-ip-address = "0.6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
