@@ -243,6 +243,11 @@ button, input, textarea { font: inherit; }
   position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
   pointer-events: none;
 }
+.tile-card img.tile-media {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+  pointer-events: none;
+}
+.tile-card img.tile-media.wait { opacity: 0; }
 .tile-card video.hidden-media {
   width: 1px; height: 1px; inset: auto; opacity: 0;
 }
@@ -253,7 +258,8 @@ button, input, textarea { font: inherit; }
   opacity: 0;
   pointer-events: none;
 }
-.tile-card.screen video {
+.tile-card.screen video,
+.tile-card.screen img.tile-media {
   object-fit: contain;
   background: #000;
 }

@@ -120,6 +120,10 @@ export async function backendRtcSignal(frame: RtcFrame): Promise<void> {
   await invoke("rtc_signal", { frame });
 }
 
+export async function backendRtcPushFrame(screen: boolean, jpeg: string): Promise<void> {
+  await invoke("rtc_push_frame", { screen, jpeg });
+}
+
 export function backendSubscribe(handlers: {
   onState: (s: UiState) => void;
   onMessage: (m: UiMessage) => void;

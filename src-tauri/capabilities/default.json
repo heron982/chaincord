@@ -15,6 +15,11 @@
     "allow-join-call",
     "allow-leave-call",
     "allow-send-signal",
+    "allow-rtc-start",
+    "allow-rtc-stop",
+    "allow-rtc-sync",
+    "allow-rtc-signal",
+    "allow-rtc-push-frame",
     "allow-save-profile",
     "allow-publish-presence",
     "allow-get-history"

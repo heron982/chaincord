@@ -106,6 +106,19 @@ async fn rtc_signal(frame: serde_json::Value, app: tauri::AppHandle) -> Result<(
 }
 
 #[tauri::command]
+async fn rtc_push_frame(screen: bool, jpeg: String, app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::rtc::push_frame(&app, screen, jpeg).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (screen, jpeg, app);
+        Ok(())
+    }
+}
+
+#[tauri::command]
 fn leave_community(app: tauri::AppHandle) -> Result<(), String> {
     peer::leave_community(&app);
     Ok(())
@@ -157,6 +170,7 @@ pub fn run() {
             rtc_stop,
             rtc_sync,
             rtc_signal,
+            rtc_push_frame,
             leave_community,
             save_profile,
             publish_presence,

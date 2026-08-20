@@ -44,6 +44,31 @@ description = "Sinalizacao WebRTC"
 commands.allow = ["send_signal"]
 
 [[permission]]
+identifier = "allow-rtc-start"
+description = "Abrir motor nativo de call no Linux"
+commands.allow = ["rtc_start"]
+
+[[permission]]
+identifier = "allow-rtc-stop"
+description = "Encerrar motor nativo de call no Linux"
+commands.allow = ["rtc_stop"]
+
+[[permission]]
+identifier = "allow-rtc-sync"
+description = "Atualizar peers da call nativa"
+commands.allow = ["rtc_sync"]
+
+[[permission]]
+identifier = "allow-rtc-signal"
+description = "Sinalizacao da call nativa"
+commands.allow = ["rtc_signal"]
+
+[[permission]]
+identifier = "allow-rtc-push-frame"
+description = "Enviar frame de camera ou tela na call nativa"
+commands.allow = ["rtc_push_frame"]
+
+[[permission]]
 identifier = "allow-save-profile"
 description = "Salvar nome e foto do perfil"
 commands.allow = ["save_profile"]

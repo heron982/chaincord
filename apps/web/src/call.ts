@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import {
+  backendRtcPushFrame,
   backendRtcSignal,
   backendRtcStart,
   backendRtcStop,
@@ -35,6 +36,7 @@ export type RemoteMedia = {
   peer: string;
   stream: MediaStream;
   screen: boolean;
+  frames?: boolean;
 };
 
 export type CallLink = {
@@ -110,6 +112,14 @@ export class CallNet {
   private native = rtcPeerConnectionMissing();
   private nativeUnsub: Array<() => void> = [];
   private nativeReady: Promise<void> = Promise.resolve();
+  private nativePump: number | null = null;
+  private nativeGrab = {
+    cam: null as HTMLVideoElement | null,
+    screen: null as HTMLVideoElement | null,
+    canvas: null as HTMLCanvasElement | null,
+  };
+  private nativeSent = { cam: false, screen: false };
+  private nativeSeen = new Set<string>();
 
   constructor(
     private readonly me: string,
@@ -136,6 +146,11 @@ export class CallNet {
       );
       this.nativeUnsub.push(
         await listen<CallLink>("ui-call-link", (e) => this.onLink(e.payload)),
+      );
+      this.nativeUnsub.push(
+        await listen<{ peer: string; screen: boolean; jpeg: string }>("ui-call-video", (e) => {
+          this.ingestNativeFrame(e.payload.peer, e.payload.screen, e.payload.jpeg);
+        }),
       );
       await backendRtcStart(this.room, this.me);
       if (this.stopped) {
@@ -173,7 +188,10 @@ export class CallNet {
 
   setCamera(stream: MediaStream | null) {
     this.cam = stream;
-    if (this.native) return;
+    if (this.native) {
+      this.kickNativePump();
+      return;
+    }
     void this.pushLocal().then(() => this.kickImpoliteOffers());
   }
 
@@ -181,9 +199,143 @@ export class CallNet {
     const track = stream?.getVideoTracks()[0];
     if (track) track.contentHint = "detail";
     this.screen = stream;
-    if (this.native) return;
+    if (this.native) {
+      this.kickNativePump();
+      return;
+    }
     void this.pushLocal();
     window.setTimeout(() => void this.pushLocal(), 200);
+  }
+
+  private ingestNativeFrame(peer: string, screen: boolean, jpeg: string) {
+    const id = screen ? `screen:${peer}` : `user:${peer}`;
+    const url = jpeg ? `data:image/jpeg;base64,${jpeg}` : "";
+    window.dispatchEvent(new CustomEvent("chaincord-frame", { detail: { id, url } }));
+    const key = `${peer}:${screen ? "s" : "c"}`;
+    if (jpeg && !this.nativeSeen.has(key)) {
+      this.nativeSeen.add(key);
+      this.onRemote({ peer, stream: new MediaStream(), screen, frames: true });
+    } else if (!jpeg && this.nativeSeen.has(key)) {
+      this.nativeSeen.delete(key);
+      this.onRemote({ peer, stream: new MediaStream(), screen, frames: false });
+    }
+  }
+
+  private kickNativePump() {
+    const live = [this.cam, this.screen].some((stream) =>
+      Boolean(stream?.getVideoTracks().some((t) => t.readyState === "live")),
+    );
+    if (!live) {
+      void this.pushNativeFrames().finally(() => {
+        if (
+          ![this.cam, this.screen].some((stream) =>
+            Boolean(stream?.getVideoTracks().some((t) => t.readyState === "live")),
+          )
+        ) {
+          this.stopNativePump();
+        }
+      });
+      return;
+    }
+    if (this.nativePump == null) {
+      this.nativePump = window.setInterval(() => void this.pushNativeFrames(), 120);
+    }
+    void this.pushNativeFrames();
+  }
+
+  private stopNativePump() {
+    if (this.nativePump != null) {
+      window.clearInterval(this.nativePump);
+      this.nativePump = null;
+    }
+    const cam = this.nativeGrab.cam;
+    const screen = this.nativeGrab.screen;
+    if (cam) {
+      cam.srcObject = null;
+      cam.remove();
+    }
+    if (screen) {
+      screen.srcObject = null;
+      screen.remove();
+    }
+    this.nativeGrab = { cam: null, screen: null, canvas: null };
+    this.nativeSent = { cam: false, screen: false };
+  }
+
+  private async pushNativeFrames() {
+    if (this.stopped) return;
+    await this.grabNative(this.cam, false);
+    await this.grabNative(this.screen, true);
+  }
+
+  private async grabNative(stream: MediaStream | null, screen: boolean) {
+    const live = stream?.getVideoTracks().some((t) => t.readyState === "live") ?? false;
+    const flag = screen ? "screen" : "cam";
+    if (!live) {
+      if (this.nativeSent[flag]) {
+        this.nativeSent[flag] = false;
+        await backendRtcPushFrame(screen, "").catch(() => undefined);
+        this.ingestNativeFrame(this.me, screen, "");
+      }
+      return;
+    }
+    try {
+      const jpeg = await this.grabJpeg(stream!, screen);
+      if (!jpeg) return;
+      this.nativeSent[flag] = true;
+      await backendRtcPushFrame(screen, jpeg);
+      this.ingestNativeFrame(this.me, screen, jpeg);
+    } catch {
+      /* webkit grab */
+    }
+  }
+
+  private async grabJpeg(stream: MediaStream, screen: boolean): Promise<string | null> {
+    const key = screen ? "screen" : "cam";
+    let video = this.nativeGrab[key];
+    if (!video) {
+      video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.autoplay = true;
+      video.setAttribute("playsinline", "true");
+      video.style.cssText =
+        "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-80px;top:-80px";
+      document.body.appendChild(video);
+      this.nativeGrab[key] = video;
+    }
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+      await video.play().catch(() => undefined);
+    }
+    if (video.readyState < 2 || video.videoWidth < 2 || video.videoHeight < 2) return null;
+    const maxW = screen ? 1280 : 640;
+    const maxH = screen ? 720 : 360;
+    let w = video.videoWidth;
+    let h = video.videoHeight;
+    const scale = Math.min(1, maxW / w, maxH / h);
+    w = Math.max(2, Math.floor((w * scale) / 2) * 2);
+    h = Math.max(2, Math.floor((h * scale) / 2) * 2);
+    let canvas = this.nativeGrab.canvas;
+    if (!canvas) {
+      canvas = document.createElement("canvas");
+      this.nativeGrab.canvas = canvas;
+    }
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, w, h);
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((b) => resolve(b), "image/jpeg", screen ? 0.52 : 0.48);
+    });
+    if (!blob) return null;
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
   }
 
   sync(peers: string[]) {
@@ -243,6 +395,7 @@ export class CallNet {
     this.trace("call encerrada", "info");
     this.stopped = true;
     if (this.native) {
+      this.stopNativePump();
       for (const unsub of this.nativeUnsub) unsub();
       this.nativeUnsub = [];
       void backendRtcStop();

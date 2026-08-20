@@ -332,7 +332,9 @@ export function App() {
       (media) => {
         setRemotes((prev) => {
           const rest = prev.filter((x) => !(x.peer === media.peer && x.screen === media.screen));
-          const live = media.stream.getTracks().some((t) => t.readyState === "live" && t.enabled);
+          const live =
+            Boolean(media.frames) ||
+            media.stream.getTracks().some((t) => t.readyState === "live" && t.enabled);
           if (media.screen && !live) return rest;
           return [...rest, media];
         });
@@ -809,7 +811,10 @@ export function App() {
                       stream: camStreamFor,
                       showVideo: mine
                         ? camOn
-                        : Boolean(remote?.stream?.getVideoTracks().some((t) => t.readyState === "live")),
+                        : Boolean(
+                            remote?.frames ||
+                              remote?.stream?.getVideoTracks().some((t) => t.readyState === "live"),
+                          ),
                       muted: face.muted,
                       deafened: face.deafened,
                       local: mine,
@@ -826,7 +831,10 @@ export function App() {
                         : null
                       : remotes.find((r) => r.peer === pk && r.screen);
                     const screenLive = Boolean(
-                      screen?.stream?.getVideoTracks().some((t) => trackLooksLive(t)),
+                      screen &&
+                        ("frames" in screen
+                          ? screen.frames
+                          : screen.stream?.getVideoTracks().some((t) => trackLooksLive(t))),
                     );
                     if (screen?.stream && (mine ? screenOn : screenLive)) {
                       tiles.push({
@@ -878,7 +886,7 @@ export function App() {
                 {callNotice && <p className="sys error stage-note">{callNotice}</p>}
                 <CallTracePanel lines={callLog} nameOf={(pk) => faceOf(pk).name} />
                 {remotes
-                  .filter((remote) => !remote.screen)
+                  .filter((remote) => !remote.screen && remote.stream.getAudioTracks().length > 0)
                   .map((remote) => (
                     <RemoteAudio
                       key={`audio:${remote.peer}`}
@@ -1382,7 +1390,28 @@ function RemoteAudio({ stream, muted }: { stream: MediaStream; muted: boolean })
   return <audio ref={ref} className="remote-audio-sink" autoPlay playsInline />;
 }
 
+function FrameImg({ tileId }: { tileId: string }) {
+  const ref = useRef<HTMLImageElement>(null);
+  const [has, setHas] = useState(false);
+  useEffect(() => {
+    const on = (e: Event) => {
+      const detail = (e as CustomEvent<{ id: string; url: string }>).detail;
+      if (!detail || detail.id !== tileId || !ref.current) return;
+      if (detail.url) {
+        ref.current.src = detail.url;
+        setHas(true);
+      } else {
+        setHas(false);
+      }
+    };
+    window.addEventListener("chaincord-frame", on);
+    return () => window.removeEventListener("chaincord-frame", on);
+  }, [tileId]);
+  return <img ref={ref} className={has ? "tile-media" : "tile-media wait"} alt="" />;
+}
+
 function CallCard({
+  id,
   name,
   avatar,
   stream,
@@ -1396,6 +1425,7 @@ function CallCard({
   expanded = false,
   onToggle,
 }: {
+  id: string;
   name: string;
   avatar: string;
   stream: MediaStream | null;
@@ -1411,12 +1441,17 @@ function CallCard({
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   const speaking = useSpeaking(muted ? null : speakingStream);
+  const paint = showVideo && (isWebKitEngine() || Boolean(stream?.getVideoTracks().length === 0));
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    if (paint) {
+      el.srcObject = null;
+      return;
+    }
     el.srcObject = showVideo && stream ? stream : null;
     if (showVideo && stream) void el.play().catch(() => undefined);
-  }, [stream, showVideo]);
+  }, [stream, showVideo, paint]);
   const cls = [
     "tile-card",
     speaking ? "speaking" : "",
@@ -1439,7 +1474,9 @@ function CallCard({
       }}
       title={expanded ? "Voltar à grade" : "Ampliar"}
     >
-      {showVideo && stream ? (
+      {showVideo && paint ? (
+        <FrameImg tileId={id} />
+      ) : showVideo && stream ? (
         <video ref={ref} autoPlay playsInline muted />
       ) : (
         <span className="tile-face">
