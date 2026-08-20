@@ -17,13 +17,13 @@ import {
 import { CallNet, type CallLink, type CallTrace, type RemoteMedia } from "./call";
 import {
   callPathHint,
-  callTileGridCols,
   effectivePresence,
   formatCallClock,
   fmtBytes,
   gradeLink,
   groupByPresence,
   isChatLine,
+  isWebKitEngine,
   keepCallFocus,
   normalizePresence,
   PRESENCE_GROUPS,
@@ -847,7 +847,6 @@ export function App() {
                   const focus = keepCallFocus(focusedTile, ids);
                   const focused = tiles.find((tile) => tile.id === focus) ?? null;
                   const rest = focused ? tiles.filter((tile) => tile.id !== focus) : tiles;
-                  const cols = callTileGridCols(tiles.length);
                   const onToggle = (id: string) => setFocusedTile((cur) => toggleCallFocus(cur, id));
                   return (
                     <div className={focused ? "stage-body focused" : "stage-body"}>
@@ -862,14 +861,7 @@ export function App() {
                         </div>
                       )}
                       {(!focused || rest.length > 0) && (
-                        <div
-                          className={focused ? "tiles strip-bottom" : "tiles"}
-                          style={
-                            focused
-                              ? undefined
-                              : { gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }
-                          }
-                        >
+                        <div className={focused ? "tiles strip-bottom" : "tiles"}>
                           {rest.map((tile) => (
                             <CallCard
                               key={tile.id}
@@ -1434,10 +1426,17 @@ function CallCard({
     .filter(Boolean)
     .join(" ");
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       className={cls}
       onClick={onToggle}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onToggle?.();
+        }
+      }}
       title={expanded ? "Voltar à grade" : "Ampliar"}
     >
       {showVideo && stream ? (
@@ -1452,36 +1451,42 @@ function CallCard({
         {muted && <MuteIcon />}
         {deafened && <DeafIcon />}
       </span>
-    </button>
+    </div>
   );
 }
 
 function useSpeaking(stream: MediaStream | null) {
   const [speaking, setSpeaking] = useState(false);
   useEffect(() => {
-    if (!stream?.getAudioTracks().length) {
+    if (!stream?.getAudioTracks().length || isWebKitEngine()) {
       setSpeaking(false);
       return;
     }
-    const probe = stream.clone();
-    const ctx = new AudioContext();
-    const src = ctx.createMediaStreamSource(probe);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 512;
-    src.connect(analyser);
-    const data = new Uint8Array(analyser.frequencyBinCount);
+    let ctx: AudioContext | null = null;
+    let src: MediaStreamAudioSourceNode | null = null;
     let raf = 0;
-    const loop = () => {
-      analyser.getByteFrequencyData(data);
-      const avg = data.reduce((sum, n) => sum + n, 0) / data.length;
-      setSpeaking(avg > 18);
+    try {
+      ctx = new AudioContext();
+      src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      src.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const loop = () => {
+        analyser.getByteFrequencyData(data);
+        const avg = data.reduce((sum, n) => sum + n, 0) / data.length;
+        setSpeaking(avg > 18);
+        raf = requestAnimationFrame(loop);
+      };
       raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
+    } catch {
+      setSpeaking(false);
+      return;
+    }
     return () => {
       cancelAnimationFrame(raf);
-      probe.getTracks().forEach((track) => track.stop());
-      void ctx.close();
+      src?.disconnect();
+      void ctx?.close();
     };
   }, [stream]);
   return speaking;

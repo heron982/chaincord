@@ -1,10 +1,13 @@
 import {
   callPathMode,
   canPublishLocalSdp,
+  createRtcPeerConnection,
   iceTraceLevel,
   iceTraceText,
+  isWebKitEngine,
   pcTraceText,
   pickCallTransceivers,
+  rtcPeerConfigs,
   rtcPolite,
   shouldHealSend,
   type CallPathMode,
@@ -94,6 +97,7 @@ export class CallNet {
   private pcSeen = new Map<string, string>();
   private heard = new Set<string>();
   private pathMode: CallPathMode = "1:1";
+  private rtcFailed: string | null = null;
   private traceSeq = 0;
 
   constructor(
@@ -156,7 +160,16 @@ export class CallNet {
     for (const id of want) {
       if (!this.pcs.has(id)) {
         const polite = rtcPolite(this.me, id);
-        this.open(id);
+        try {
+          this.open(id);
+        } catch (err) {
+          const why = err instanceof Error ? err.message : String(err);
+          if (this.rtcFailed !== why) {
+            this.rtcFailed = why;
+            this.trace(`WebRTC: ${why}`, "err", id);
+          }
+          continue;
+        }
         this.trace("enlace aberto", "info", id);
         if (!polite) this.scheduleOffer(id);
       }
@@ -417,10 +430,12 @@ export class CallNet {
   private open(peer: string): RTCPeerConnection {
     const existing = this.pcs.get(peer);
     if (existing) return existing;
-    const pc = new RTCPeerConnection({
-      iceServers,
-      bundlePolicy: "max-bundle",
-    });
+    const made = createRtcPeerConnection(
+      typeof RTCPeerConnection === "undefined" ? undefined : RTCPeerConnection,
+      rtcPeerConfigs(iceServers, isWebKitEngine()),
+    );
+    if (!made.ok) throw new Error(made.error);
+    const pc = made.pc;
     this.pcs.set(peer, pc);
 
     pc.onicecandidate = (ev) => {
@@ -431,7 +446,14 @@ export class CallNet {
         from: this.me,
         to: peer,
         kind: "ice",
-        candidate: ev.candidate ? ev.candidate.toJSON() : null,
+        candidate: ev.candidate
+          ? {
+              candidate: ev.candidate.candidate,
+              sdpMid: ev.candidate.sdpMid,
+              sdpMLineIndex: ev.candidate.sdpMLineIndex,
+              usernameFragment: ev.candidate.usernameFragment,
+            }
+          : null,
       });
     };
 

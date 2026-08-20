@@ -6,9 +6,14 @@ import {
   gradeLink,
   groupByPresence,
   isChatLine,
+  isWebKitEngine,
   keepCallFocus,
   presenceLabel,
   rtcPolite,
+  rtcPeerConfigs,
+  createRtcPeerConnection,
+  rtcIceServersFor,
+  webkitSafeIceUrl,
   seedPercent,
   seedingCardVisible,
   shouldHealSend,
@@ -119,6 +124,63 @@ describe("call tiles", () => {
   it("grows the grid with people and screen cards together", () => {
     expect(callTileGridCols(2)).toBe(2);
     expect(callTileGridCols(5)).toBe(3);
+  });
+
+  it("detects WebKitGTK without treating Chromium as WebKit", () => {
+    expect(
+      isWebKitEngine(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+      ),
+    ).toBe(true);
+    expect(
+      isWebKitEngine(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      ),
+    ).toBe(false);
+  });
+
+  it("drops ICE URLs that WebKitGTK rejects", () => {
+    expect(webkitSafeIceUrl("stun:stun.l.google.com:19302")).toBe(true);
+    expect(webkitSafeIceUrl("turn:openrelay.metered.ca:80")).toBe(true);
+    expect(webkitSafeIceUrl("turns:openrelay.metered.ca:443?transport=tcp")).toBe(false);
+    expect(webkitSafeIceUrl("turn:openrelay.metered.ca:80?transport=tcp")).toBe(false);
+    const servers = rtcIceServersFor(
+      [
+        { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+        {
+          urls: [
+            "turn:openrelay.metered.ca:80",
+            "turns:openrelay.metered.ca:443?transport=tcp",
+          ],
+          username: "a",
+          credential: "b",
+        },
+      ],
+      true,
+    );
+    expect(servers[0].urls).toEqual(["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]);
+    expect(servers[1].urls).toBe("turn:openrelay.metered.ca:80");
+  });
+
+  it("falls back RTC configs until one constructor works", () => {
+    const tries: RTCConfiguration[] = [];
+    const Ctor = class {
+      constructor(config?: RTCConfiguration) {
+        tries.push(config ?? {});
+        if (tries.length < 2) throw new Error("Invalid ICE server URL: turns:");
+      }
+    } as unknown as new (config?: RTCConfiguration) => RTCPeerConnection;
+    const made = createRtcPeerConnection(
+      Ctor,
+      rtcPeerConfigs(
+        [{ urls: "stun:stun.l.google.com:19302" }, { urls: "turns:bad" }],
+        true,
+      ),
+    );
+    expect(made.ok).toBe(true);
+    expect(tries.length).toBeGreaterThan(1);
+    const missing = createRtcPeerConnection(undefined, [{}]);
+    expect(missing).toEqual({ ok: false, error: "RTCPeerConnection ausente no webview" });
   });
 });
 
