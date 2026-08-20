@@ -67,7 +67,7 @@ fn offline_status() -> String {
     "offline".into()
 }
 
-const PRESENCE_TTL_MS: i64 = 35_000;
+const PRESENCE_TTL_MS: i64 = 90_000;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct UiMessage {
@@ -217,6 +217,11 @@ impl AppState {
     pub fn voice_flags(&self) -> (bool, bool) {
         let inner = self.inner.lock().expect("state");
         (inner.muted, inner.deafened)
+    }
+
+    pub fn hear_peer(&self, pk: &str) {
+        let mut inner = self.inner.lock().expect("state");
+        touch_seen(&mut inner, pk);
     }
 }
 
@@ -583,7 +588,7 @@ pub fn boot(app: &AppHandle) {
 
 fn spawn_presence_pulse(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(20));
+        let mut tick = tokio::time::interval(Duration::from_secs(8));
         loop {
             tick.tick().await;
             let state = state_of(&app);
@@ -1149,13 +1154,13 @@ fn expire_stale_presence(inner: &mut Inner, now: i64) -> Vec<(String, String)> {
         .filter(|(pk, ts)| **pk != me && now.saturating_sub(**ts) > PRESENCE_TTL_MS)
         .map(|(pk, _)| pk.clone())
         .collect();
-    let mut leaves = Vec::new();
     for pk in stale {
-        for room in mark_peer_offline(inner, &pk) {
-            leaves.push((pk.clone(), room));
+        inner.last_seen.remove(&pk);
+        if let Some(profile) = inner.profiles.get_mut(&pk) {
+            profile.status = "offline".into();
         }
     }
-    leaves
+    Vec::new()
 }
 
 fn drop_from_voice(inner: &mut Inner, pk: &str) -> Vec<String> {
@@ -1389,6 +1394,9 @@ fn apply_voice_action(inner: &mut Inner, room: &str, action: &str, pk: &str) {
         }
         inner.voice.entry(room).or_default().insert(pk.to_string());
     } else if action == "leave" {
+        if pk == inner.identity.public_hex() {
+            return;
+        }
         if let Some(people) = inner.voice.get_mut(&room) {
             people.remove(pk);
         }
@@ -2303,7 +2311,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_peer_is_removed_from_the_call() {
+    fn stale_presence_does_not_kick_call() {
         let mut inner = sample_inner();
         inner.profiles.insert(
             "aa".into(),
@@ -2317,9 +2325,10 @@ mod tests {
             .insert("lobby".into(), HashSet::from(["aa".into(), "bb".into()]));
         inner.last_seen.insert("aa".into(), 10);
         let leaves = expire_stale_presence(&mut inner, 10 + PRESENCE_TTL_MS + 1);
-        assert!(!inner.voice.get("lobby").unwrap().contains("aa"));
+        assert!(inner.voice.get("lobby").unwrap().contains("aa"));
         assert!(inner.voice.get("lobby").unwrap().contains("bb"));
-        assert_eq!(leaves, vec![("aa".to_string(), "lobby".to_string())]);
+        assert!(leaves.is_empty());
+        assert_eq!(live_status(&inner, "aa", 10 + PRESENCE_TTL_MS + 1), "offline");
     }
 
     #[test]
