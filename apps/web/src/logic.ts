@@ -33,6 +33,21 @@ export function trackLooksLive(track: {
   return Boolean(track && track.readyState === "live" && track.enabled && !track.muted);
 }
 
+export function remoteScreenVisible(media: {
+  frames?: boolean;
+  stream?: {
+    getVideoTracks(): Array<{ readyState: string; enabled: boolean; muted: boolean }>;
+  } | null;
+} | null | undefined): boolean {
+  if (!media) return false;
+  if (media.frames) return true;
+  return Boolean(
+    media.stream
+      ?.getVideoTracks()
+      .some((track) => trackLooksLive(track)),
+  );
+}
+
 export function isWebKitEngine(ua = typeof navigator === "undefined" ? "" : navigator.userAgent): boolean {
   return /AppleWebKit/i.test(ua) && !/Chrome|Chromium|Edg\//i.test(ua);
 }

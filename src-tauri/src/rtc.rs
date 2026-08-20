@@ -27,7 +27,7 @@ use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
+use webrtc::rtp_transceiver::{RTCPFeedback, RTCRtpTransceiverInit};
 use webrtc::rtp::codecs::h264::H264Packet;
 use webrtc::rtp::packetizer::Depacketizer;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
@@ -179,15 +179,41 @@ fn pcmu_codec() -> RTCRtpCodecParameters {
     }
 }
 
+fn h264_feedback() -> Vec<RTCPFeedback> {
+    vec![
+        RTCPFeedback {
+            typ: "goog-remb".into(),
+            parameter: String::new(),
+        },
+        RTCPFeedback {
+            typ: "ccm".into(),
+            parameter: "fir".into(),
+        },
+        RTCPFeedback {
+            typ: "nack".into(),
+            parameter: String::new(),
+        },
+        RTCPFeedback {
+            typ: "nack".into(),
+            parameter: "pli".into(),
+        },
+    ]
+}
+
+fn h264_cap() -> RTCRtpCodecCapability {
+    RTCRtpCodecCapability {
+        mime_type: MIME_TYPE_H264.to_owned(),
+        clock_rate: 90000,
+        sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+            .into(),
+        rtcp_feedback: h264_feedback(),
+        ..Default::default()
+    }
+}
+
 fn h264_codec() -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
-        capability: RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_H264.to_owned(),
-            clock_rate: 90000,
-            sdp_fmtp_line:
-                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".into(),
-            ..Default::default()
-        },
+        capability: h264_cap(),
         payload_type: 125,
         ..Default::default()
     }
@@ -417,13 +443,7 @@ fn spawn_pulse(
 
 fn video_sample_track(id: &str) -> Arc<TrackLocalStaticSample> {
     Arc::new(TrackLocalStaticSample::new(
-        RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_H264.to_owned(),
-            clock_rate: 90000,
-            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                .into(),
-            ..Default::default()
-        },
+        h264_cap(),
         id.into(),
         "chaincord".into(),
     ))
@@ -465,23 +485,45 @@ fn h264_to_jpeg(decoder: &mut openh264::decoder::Decoder, nals: &[u8]) -> Option
     rgb_jpeg(w as u32, h as u32, &rgb)
 }
 
+fn video_encoder(screen: bool) -> Result<openh264::encoder::Encoder, openh264::Error> {
+    let cfg = openh264::encoder::EncoderConfig::new()
+        .set_bitrate_bps(if screen { 1_800_000 } else { 800_000 })
+        .max_frame_rate(10.0)
+        .enable_skip_frame(false)
+        .rate_control_mode(openh264::encoder::RateControlMode::Bitrate)
+        .usage_type(if screen {
+            openh264::encoder::UsageType::ScreenContentRealTime
+        } else {
+            openh264::encoder::UsageType::CameraVideoRealTime
+        });
+    openh264::encoder::Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
+}
+
 fn spawn_video_send(
+    app: AppHandle,
+    traces: Arc<RtcHub>,
+    label: &'static str,
+    screen: bool,
     running: Arc<AtomicBool>,
     jpeg: Arc<StdMutex<Option<Vec<u8>>>>,
     tracks: Arc<StdMutex<Vec<Arc<TrackLocalStaticSample>>>>,
 ) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    let enc_run = running.clone();
     std::thread::spawn(move || {
-        let Ok(mut encoder) = openh264::encoder::Encoder::new() else {
+        let Ok(mut encoder) = video_encoder(screen) else {
+            trace(&app, traces.as_ref(), &format!("{label} encoder falhou"), "err", None);
             return;
         };
         let mut ticks = 0u32;
-        while running.load(Ordering::Relaxed) {
+        let mut announced = false;
+        while enc_run.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(VIDEO_MS));
             let Some(frame) = jpeg.lock().ok().and_then(|g| g.clone()) else {
                 continue;
             };
             ticks += 1;
-            if ticks % 24 == 1 {
+            if ticks == 1 || ticks % 12 == 0 {
                 encoder.force_intra_frame();
             }
             let Some(h264) = jpeg_to_h264(&mut encoder, &frame) else {
@@ -490,20 +532,33 @@ fn spawn_video_send(
             if h264.is_empty() {
                 continue;
             }
+            if !announced {
+                announced = true;
+                trace(
+                    &app,
+                    traces.as_ref(),
+                    &format!("{label} enviando"),
+                    "ok",
+                    None,
+                );
+            }
+            let _ = tx.try_send(h264);
+        }
+    });
+    tauri::async_runtime::spawn(async move {
+        while let Some(h264) = rx.recv().await {
             let list = tracks.lock().map(|t| t.clone()).unwrap_or_default();
             if list.is_empty() {
                 continue;
             }
-            tauri::async_runtime::spawn(async move {
-                let sample = Sample {
-                    data: Bytes::from(h264),
-                    duration: Duration::from_millis(VIDEO_MS),
-                    ..Default::default()
-                };
-                for track in list {
-                    let _ = track.write_sample(&sample).await;
-                }
-            });
+            let sample = Sample {
+                data: Bytes::from(h264),
+                duration: Duration::from_millis(VIDEO_MS),
+                ..Default::default()
+            };
+            for track in list {
+                let _ = track.write_sample(&sample).await;
+            }
         }
     });
 }
@@ -1112,8 +1167,24 @@ pub async fn start(app: &AppHandle, room: String, me: String) -> Result<(), Stri
         ) {
             trace(app, &hub, "mic nativo indisponível", "warn", None);
         }
-        spawn_video_send(running.clone(), cam_jpeg.clone(), cam_tracks.clone());
-        spawn_video_send(running.clone(), screen_jpeg.clone(), screen_tracks.clone());
+        spawn_video_send(
+            app.clone(),
+            hub.clone(),
+            "câmera",
+            false,
+            running.clone(),
+            cam_jpeg.clone(),
+            cam_tracks.clone(),
+        );
+        spawn_video_send(
+            app.clone(),
+            hub.clone(),
+            "tela",
+            true,
+            running.clone(),
+            screen_jpeg.clone(),
+            screen_tracks.clone(),
+        );
         let hub_link = hub.clone();
         let app_link = app.clone();
         let run_link = running.clone();

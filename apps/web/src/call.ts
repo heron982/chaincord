@@ -120,6 +120,8 @@ export class CallNet {
   };
   private nativeSent = { cam: false, screen: false };
   private nativeSeen = new Set<string>();
+  private remoteSinks = new Map<string, HTMLVideoElement>();
+  private seenScreen = new Set<string>();
 
   constructor(
     private readonly me: string,
@@ -309,8 +311,8 @@ export class CallNet {
       await video.play().catch(() => undefined);
     }
     if (video.readyState < 2 || video.videoWidth < 2 || video.videoHeight < 2) return null;
-    const maxW = screen ? 1280 : 640;
-    const maxH = screen ? 720 : 360;
+    const maxW = screen ? 960 : 640;
+    const maxH = screen ? 540 : 360;
     let w = video.videoWidth;
     let h = video.videoHeight;
     const scale = Math.min(1, maxW / w, maxH / h);
@@ -327,7 +329,7 @@ export class CallNet {
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, w, h);
     const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob((b) => resolve(b), "image/jpeg", screen ? 0.52 : 0.48);
+      canvas.toBlob((b) => resolve(b), "image/jpeg", screen ? 0.42 : 0.48);
     });
     if (!blob) return null;
     const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -406,6 +408,7 @@ export class CallNet {
       this.timer = null;
     }
     for (const id of [...this.pcs.keys()]) this.drop(id);
+    this.dropAllSinks();
   }
 
   private enqueue(peer: string, job: () => Promise<void>) {
@@ -677,12 +680,16 @@ export class CallNet {
       const publish = () => {
         if (this.stopped) return;
         const isScreen =
-          ev.track.kind === "video" && this.screenXcvr.get(peer) === ev.transceiver;
-        if (isScreen && !trackLive(ev.track)) {
+          ev.track.kind === "video" &&
+          (this.screenXcvr.get(peer) === ev.transceiver || ev.transceiver.mid === "2");
+        if (isScreen && ev.track.readyState === "ended") {
           this.remoteScr.delete(peer);
+          this.dropSink(peer, true);
+          this.seenScreen.delete(peer);
           this.onRemote({ peer, stream: new MediaStream(), screen: true });
           return;
         }
+        if (ev.track.kind === "video") this.attachSink(peer, isScreen, ev.track);
         const map = isScreen ? this.remoteScr : this.remoteCam;
         let stream = map.get(peer);
         if (!stream) {
@@ -698,6 +705,10 @@ export class CallNet {
         if (ev.track.kind === "audio" && !this.heard.has(peer)) {
           this.heard.add(peer);
           this.trace("áudio chegou", "ok", peer);
+        }
+        if (isScreen && trackLive(ev.track) && !this.seenScreen.has(peer)) {
+          this.seenScreen.add(peer);
+          this.trace("tela chegou", "ok", peer);
         }
         this.onRemote({ peer, stream: new MediaStream(stream.getTracks()), screen: isScreen });
       };
@@ -970,6 +981,51 @@ export class CallNet {
     });
   }
 
+  private sinkKey(peer: string, screen: boolean) {
+    return `${peer}:${screen ? "s" : "c"}`;
+  }
+
+  private attachSink(peer: string, screen: boolean, track: MediaStreamTrack) {
+    const key = this.sinkKey(peer, screen);
+    let el = this.remoteSinks.get(key);
+    if (!el) {
+      el = document.createElement("video");
+      el.muted = true;
+      el.playsInline = true;
+      el.autoplay = true;
+      el.setAttribute("playsinline", "true");
+      el.style.cssText =
+        "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-80px;top:-80px";
+      document.body.appendChild(el);
+      this.remoteSinks.set(key, el);
+    }
+    const stream = new MediaStream([track]);
+    el.srcObject = stream;
+    void el.play().catch(() => undefined);
+  }
+
+  private dropSink(peer: string, screen: boolean) {
+    const key = this.sinkKey(peer, screen);
+    const el = this.remoteSinks.get(key);
+    if (!el) return;
+    el.srcObject = null;
+    el.remove();
+    this.remoteSinks.delete(key);
+  }
+
+  private dropSinks(peer: string) {
+    this.dropSink(peer, false);
+    this.dropSink(peer, true);
+  }
+
+  private dropAllSinks() {
+    for (const el of this.remoteSinks.values()) {
+      el.srcObject = null;
+      el.remove();
+    }
+    this.remoteSinks.clear();
+  }
+
   private drop(peer: string, silent = false) {
     const pc = this.pcs.get(peer);
     if (!pc) return;
@@ -993,6 +1049,8 @@ export class CallNet {
     this.iceSeen.delete(peer);
     this.pcSeen.delete(peer);
     this.heard.delete(peer);
+    this.seenScreen.delete(peer);
+    this.dropSinks(peer);
     this.trace(silent ? "par saiu" : "enlace fechado", "warn", peer);
     this.noteMode();
     this.onGone(peer);

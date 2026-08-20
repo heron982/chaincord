@@ -28,10 +28,10 @@ import {
   normalizePresence,
   PRESENCE_GROUPS,
   presenceLabel,
+  remoteScreenVisible,
   screenTileId,
   seedPercent,
   toggleCallFocus,
-  trackLooksLive,
   userTileId,
   type Presence,
 } from "./logic";
@@ -830,13 +830,7 @@ export function App() {
                         ? { stream: screenStream.current }
                         : null
                       : remotes.find((r) => r.peer === pk && r.screen);
-                    const screenLive = Boolean(
-                      screen &&
-                        ("frames" in screen
-                          ? screen.frames
-                          : screen.stream?.getVideoTracks().some((t) => trackLooksLive(t))),
-                    );
-                    if (screen?.stream && (mine ? screenOn : screenLive)) {
+                    if (screen?.stream && (mine ? screenOn : remoteScreenVisible(screen))) {
                       tiles.push({
                         id: screenTileId(pk),
                         name: `${face.name} · tela`,

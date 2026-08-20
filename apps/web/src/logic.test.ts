@@ -25,6 +25,7 @@ import {
   pickCallTransceivers,
   toggleCallFocus,
   trackLooksLive,
+  remoteScreenVisible,
 } from "./logic";
 
 describe("seeding card", () => {
@@ -99,6 +100,25 @@ describe("media track liveness", () => {
       trackLooksLive({ readyState: "ended", enabled: true, muted: false }),
     ).toBe(false);
     expect(trackLooksLive(null)).toBe(false);
+  });
+
+  it("shows a remote screen tile once frames or unmuted video arrive", () => {
+    expect(remoteScreenVisible(null)).toBe(false);
+    expect(remoteScreenVisible({ frames: true, stream: { getVideoTracks: () => [] } })).toBe(true);
+    expect(
+      remoteScreenVisible({
+        stream: {
+          getVideoTracks: () => [{ readyState: "live", enabled: true, muted: true }],
+        },
+      }),
+    ).toBe(false);
+    expect(
+      remoteScreenVisible({
+        stream: {
+          getVideoTracks: () => [{ readyState: "live", enabled: true, muted: false }],
+        },
+      }),
+    ).toBe(true);
   });
 });
 
