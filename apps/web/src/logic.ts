@@ -92,8 +92,8 @@ export function rtcPeerConfigs(servers: RTCIceServer[], webkit: boolean): RTCCon
 export function preferH264Codecs<T extends { mimeType: string }>(codecs: T[]): T[] {
   const h264 = codecs.filter((codec) => /h264/i.test(codec.mimeType));
   if (!h264.length) return codecs;
-  const rtx = codecs.filter((codec) => /rtx/i.test(codec.mimeType));
-  return [...h264, ...rtx];
+  const rest = codecs.filter((codec) => !/h264/i.test(codec.mimeType));
+  return [...h264, ...rest];
 }
 
 export function createRtcPeerConnection(

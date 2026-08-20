@@ -279,6 +279,7 @@ describe("call negotiation", () => {
       { mimeType: "video/H264" },
       { mimeType: "video/rtx" },
     ]);
-    expect(ranked.map((c) => c.mimeType)).toEqual(["video/H264", "video/rtx"]);
+    expect(ranked[0].mimeType).toBe("video/H264");
+    expect(ranked.map((c) => c.mimeType)).toContain("video/VP8");
   });
 });

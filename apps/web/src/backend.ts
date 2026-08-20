@@ -124,6 +124,10 @@ export async function backendRtcPushFrame(screen: boolean, jpeg: string): Promis
   await invoke("rtc_push_frame", { screen, jpeg });
 }
 
+export async function backendRtcShareScreen(on: boolean): Promise<void> {
+  await invoke("rtc_share_screen", { on });
+}
+
 export function backendSubscribe(handlers: {
   onState: (s: UiState) => void;
   onMessage: (m: UiMessage) => void;

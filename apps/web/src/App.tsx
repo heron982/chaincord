@@ -12,6 +12,7 @@ import {
   backendSaveProfile,
   backendSendRtc,
   backendSubscribe,
+  rtcPeerConnectionMissing,
   type UiState,
 } from "./backend";
 import { CallNet, type CallLink, type CallTrace, type RemoteMedia } from "./call";
@@ -536,6 +537,19 @@ export function App() {
       screenStream.current = null;
       setScreenOn(false);
       callRef.current?.setScreen(null);
+      if (rtcPeerConnectionMissing()) {
+        await callRef.current?.setScreenNative(false).catch(() => undefined);
+      }
+      return;
+    }
+    if (rtcPeerConnectionMissing()) {
+      try {
+        await callRef.current?.setScreenNative(true);
+        setScreenOn(true);
+        setCallNotice(null);
+      } catch {
+        setCallNotice("Não deu para compartilhar a tela neste dispositivo.");
+      }
       return;
     }
     try {
@@ -827,15 +841,15 @@ export function App() {
                     });
                     const screen = mine
                       ? screenOn
-                        ? { stream: screenStream.current }
+                        ? { stream: screenStream.current ?? new MediaStream(), frames: true }
                         : null
                       : remotes.find((r) => r.peer === pk && r.screen);
-                    if (screen?.stream && (mine ? screenOn : remoteScreenVisible(screen))) {
+                    if (mine ? screenOn : Boolean(screen && remoteScreenVisible(screen))) {
                       tiles.push({
                         id: screenTileId(pk),
                         name: `${face.name} · tela`,
                         avatar: face.avatar,
-                        stream: screen.stream,
+                        stream: screen?.stream ?? new MediaStream(),
                         showVideo: true,
                         muted: false,
                         deafened: false,

@@ -57,6 +57,7 @@ struct Session {
     screen_tracks: Arc<StdMutex<Vec<Arc<TrackLocalStaticSample>>>>,
     cam_jpeg: Arc<StdMutex<Option<Vec<u8>>>>,
     screen_jpeg: Arc<StdMutex<Option<Vec<u8>>>>,
+    screen_share: Arc<AtomicBool>,
     play: Arc<StdMutex<VecDeque<i16>>>,
     running: Arc<AtomicBool>,
 }
@@ -500,6 +501,87 @@ fn rgb_jpeg(w: u32, h: u32, rgb: &[u8]) -> Option<Vec<u8>> {
         .encode(img.as_raw(), ow, oh, image::ExtendedColorType::Rgb8)
         .ok()?;
     Some(buf)
+}
+
+fn grab_screen_gtk() -> Option<Vec<u8>> {
+    use gdk::prelude::*;
+    let screen = gdk::Screen::default()?;
+    let root = screen.root_window()?;
+    let w = root.width();
+    let h = root.height();
+    if w < 2 || h < 2 {
+        return None;
+    }
+    let pix = root.pixbuf(0, 0, w, h)?;
+    let pw = pix.width() as u32;
+    let ph = pix.height() as u32;
+    let stride = pix.rowstride() as usize;
+    let ch = pix.n_channels() as usize;
+    if ch < 3 {
+        return None;
+    }
+    let data = pix.pixel_bytes()?;
+    let bytes = data.as_ref();
+    let mut rgb = Vec::with_capacity((pw * ph * 3) as usize);
+    for y in 0..ph as usize {
+        let row = bytes.get(y * stride..)?;
+        for x in 0..pw as usize {
+            let i = x * ch;
+            rgb.extend_from_slice(row.get(i..i + 3)?);
+        }
+    }
+    rgb_jpeg(pw, ph, &rgb)
+}
+
+fn grab_screen_on_main(app: &AppHandle) -> Option<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = app.run_on_main_thread(move || {
+        let _ = tx.send(grab_screen_gtk());
+    });
+    rx.recv_timeout(Duration::from_millis(500)).ok().flatten()
+}
+
+fn spawn_screen_cap(
+    app: AppHandle,
+    traces: Arc<RtcHub>,
+    me: String,
+    running: Arc<AtomicBool>,
+    sharing: Arc<AtomicBool>,
+    jpeg: Arc<StdMutex<Option<Vec<u8>>>>,
+) {
+    std::thread::spawn(move || {
+        let mut announced = false;
+        while running.load(Ordering::Relaxed) {
+            if !sharing.load(Ordering::Relaxed) {
+                announced = false;
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            let Some(frame) = grab_screen_on_main(&app) else {
+                if !announced {
+                    announced = true;
+                    trace(
+                        &app,
+                        traces.as_ref(),
+                        "captura de tela falhou",
+                        "warn",
+                        None,
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(400));
+                continue;
+            };
+            if !announced {
+                announced = true;
+                trace(&app, traces.as_ref(), "tela nativa enviando", "ok", None);
+            }
+            if let Ok(mut g) = jpeg.lock() {
+                *g = Some(frame.clone());
+            }
+            emit_video(&app, &me, true, &frame);
+            std::thread::sleep(Duration::from_millis(VIDEO_MS));
+        }
+    });
 }
 
 fn jpeg_to_h264(encoder: &mut openh264::encoder::Encoder, jpeg: &[u8]) -> Option<Vec<u8>> {
@@ -1283,6 +1365,15 @@ pub async fn start(app: &AppHandle, room: String, me: String) -> Result<(), Stri
             screen_jpeg.clone(),
             screen_tracks.clone(),
         );
+        let screen_share = Arc::new(AtomicBool::new(false));
+        spawn_screen_cap(
+            app.clone(),
+            hub.clone(),
+            me.clone(),
+            running.clone(),
+            screen_share.clone(),
+            screen_jpeg.clone(),
+        );
         let hub_link = hub.clone();
         let app_link = app.clone();
         let run_link = running.clone();
@@ -1302,6 +1393,7 @@ pub async fn start(app: &AppHandle, room: String, me: String) -> Result<(), Stri
             screen_tracks,
             cam_jpeg,
             screen_jpeg,
+            screen_share,
             play,
             running,
         });
@@ -1468,6 +1560,41 @@ pub async fn push_frame(app: &AppHandle, screen: bool, jpeg: String) -> Result<(
     };
     if let Ok(mut g) = slot.lock() {
         *g = bytes;
+    }
+    Ok(())
+}
+
+pub async fn share_screen(app: &AppHandle, on: bool) -> Result<(), String> {
+    let hub = state(app).rtc.clone();
+    if on {
+        let app2 = {
+            let guard = hub.inner.lock().await;
+            let session = guard.as_ref().ok_or("call nativa parada")?;
+            session.app.clone()
+        };
+        if grab_screen_on_main(&app2).is_none() {
+            return Err("captura de tela indisponível neste compositor".into());
+        }
+        let guard = hub.inner.lock().await;
+        let session = guard.as_ref().ok_or("call nativa parada")?;
+        session.screen_share.store(true, Ordering::Relaxed);
+        trace(app, &hub, "tela nativa on", "info", None);
+    } else {
+        let guard = hub.inner.lock().await;
+        let session = guard.as_ref().ok_or("call nativa parada")?;
+        session.screen_share.store(false, Ordering::Relaxed);
+        if let Ok(mut g) = session.screen_jpeg.lock() {
+            *g = None;
+        }
+        let _ = session.app.emit(
+            VIDEO,
+            CallVideo {
+                peer: session.me.clone(),
+                screen: true,
+                jpeg: String::new(),
+            },
+        );
+        trace(app, &hub, "tela nativa off", "info", None);
     }
     Ok(())
 }

@@ -119,6 +119,19 @@ async fn rtc_push_frame(screen: bool, jpeg: String, app: tauri::AppHandle) -> Re
 }
 
 #[tauri::command]
+async fn rtc_share_screen(on: bool, app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::rtc::share_screen(&app, on).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (on, app);
+        Err("captura nativa só no Linux".into())
+    }
+}
+
+#[tauri::command]
 fn leave_community(app: tauri::AppHandle) -> Result<(), String> {
     peer::leave_community(&app);
     Ok(())
@@ -171,6 +184,7 @@ pub fn run() {
             rtc_sync,
             rtc_signal,
             rtc_push_frame,
+            rtc_share_screen,
             leave_community,
             save_profile,
             publish_presence,

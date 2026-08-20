@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import {
   backendRtcPushFrame,
+  backendRtcShareScreen,
   backendRtcSignal,
   backendRtcStart,
   backendRtcStop,
@@ -16,7 +17,6 @@ import {
   isWebKitEngine,
   pcTraceText,
   pickCallTransceivers,
-  preferH264Codecs,
   rtcPeerConfigs,
   rtcPolite,
   shouldHealSend,
@@ -203,11 +203,19 @@ export class CallNet {
     if (track) track.contentHint = "detail";
     this.screen = stream;
     if (this.native) {
+      void backendRtcShareScreen(Boolean(stream)).catch((err: unknown) => {
+        this.trace(`tela: ${String(err)}`, "err");
+      });
       this.kickNativePump();
       return;
     }
     void this.pushLocal().then(() => this.kickImpoliteOffers());
     window.setTimeout(() => void this.pushLocal(), 200);
+  }
+
+  async setScreenNative(on: boolean) {
+    await backendRtcShareScreen(on);
+    this.trace(on ? "tela nativa on" : "tela nativa off", on ? "ok" : "info");
   }
 
   private ingestNativeFrame(peer: string, screen: boolean, jpeg: string) {
@@ -268,7 +276,7 @@ export class CallNet {
   private async pushNativeFrames() {
     if (this.stopped) return;
     await this.grabNative(this.cam, false);
-    await this.grabNative(this.screen, true);
+    if (this.screen) await this.grabNative(this.screen, true);
   }
 
   private async grabNative(stream: MediaStream | null, screen: boolean) {
@@ -845,35 +853,6 @@ export class CallNet {
     this.camSenders.set(peer, cam.sender);
     this.screenSenders.set(peer, screen.sender);
     this.screenXcvr.set(peer, screen);
-    this.preferH264(pc);
-  }
-
-  private preferH264(pc: RTCPeerConnection) {
-    const caps = RTCRtpSender.getCapabilities?.("video");
-    if (!caps?.codecs.length) return;
-    const ranked = preferH264Codecs(caps.codecs);
-    for (const xcvr of pc.getTransceivers()) {
-      const kind = xcvr.receiver?.track?.kind || xcvr.sender?.track?.kind;
-      if (kind !== "video") continue;
-      try {
-        xcvr.setCodecPreferences(ranked);
-      } catch {
-        /* older chromium */
-      }
-    }
-  }
-
-  private async tuneVideoSender(sender: RTCRtpSender | undefined, screen: boolean) {
-    if (!sender) return;
-    try {
-      const params = sender.getParameters();
-      if (!params.encodings?.length) params.encodings = [{}];
-      params.encodings[0].maxBitrate = screen ? 1_800_000 : 800_000;
-      if (screen) params.encodings[0].maxFramerate = 15;
-      await sender.setParameters(params);
-    } catch {
-      /* encodings not ready */
-    }
   }
 
   private xcvrKind(t: RTCRtpTransceiver): string | undefined {
@@ -883,7 +862,6 @@ export class CallNet {
   }
 
   private bindSenders(pc: RTCPeerConnection, peer: string) {
-    this.preferH264(pc);
     const live = [...pc.getTransceivers()].filter((t) => t.direction !== "stopped");
     for (const t of live) {
       if (t.direction === "recvonly" || t.direction === "inactive") {
@@ -928,12 +906,6 @@ export class CallNet {
         this.screenXcvr.set(peer, live[pick.screen]);
       }
     }
-    if (!this.screenSenders.get(peer)) {
-      const extra = pc.addTransceiver("video", { direction: "sendrecv" });
-      this.screenSenders.set(peer, extra.sender);
-      this.screenXcvr.set(peer, extra);
-      this.preferH264(pc);
-    }
   }
 
   private async pushLocal(only?: string) {
@@ -948,16 +920,13 @@ export class CallNet {
       await this.attachTrack(this.audioSenders.get(peer), audio);
       await this.attachTrack(this.camSenders.get(peer), video);
       await this.attachTrack(this.screenSenders.get(peer), scr);
-      await this.tuneVideoSender(this.camSenders.get(peer), false);
-      await this.tuneVideoSender(this.screenSenders.get(peer), true);
-      if (scr) {
-        if (!this.screenSenders.get(peer)) {
-          this.trace("tela sem canal de envio", "warn", peer);
-        } else if (!this.seenScreen.has(`send:${peer}`)) {
-          this.seenScreen.add(`send:${peer}`);
-          this.trace("tela anexada", "info", peer);
-        }
-      } else {
+      if (scr && !this.screenSenders.get(peer) && !this.seenScreen.has(`send:${peer}`)) {
+        this.seenScreen.add(`send:${peer}`);
+        this.trace("tela sem canal de envio", "warn", peer);
+      } else if (scr && this.screenSenders.get(peer) && !this.seenScreen.has(`send:${peer}`)) {
+        this.seenScreen.add(`send:${peer}`);
+        this.trace("tela anexada", "info", peer);
+      } else if (!scr) {
         this.seenScreen.delete(`send:${peer}`);
       }
     }
