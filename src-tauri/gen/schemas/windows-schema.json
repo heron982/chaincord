@@ -231,6 +231,36 @@
           "markdownDescription": "Publicar nome, foto e mudo na call"
         },
         {
+          "description": "Enviar frame de camera ou tela na call nativa",
+          "type": "string",
+          "const": "allow-rtc-push-frame",
+          "markdownDescription": "Enviar frame de camera ou tela na call nativa"
+        },
+        {
+          "description": "Sinalizacao da call nativa",
+          "type": "string",
+          "const": "allow-rtc-signal",
+          "markdownDescription": "Sinalizacao da call nativa"
+        },
+        {
+          "description": "Abrir motor nativo de call no Linux",
+          "type": "string",
+          "const": "allow-rtc-start",
+          "markdownDescription": "Abrir motor nativo de call no Linux"
+        },
+        {
+          "description": "Encerrar motor nativo de call no Linux",
+          "type": "string",
+          "const": "allow-rtc-stop",
+          "markdownDescription": "Encerrar motor nativo de call no Linux"
+        },
+        {
+          "description": "Atualizar peers da call nativa",
+          "type": "string",
+          "const": "allow-rtc-sync",
+          "markdownDescription": "Atualizar peers da call nativa"
+        },
+        {
           "description": "Salvar nome e foto do perfil",
           "type": "string",
           "const": "allow-save-profile",
