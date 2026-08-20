@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_PCMU};
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
@@ -16,6 +17,7 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::policy::bundle_policy::RTCBundlePolicy;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -41,6 +43,7 @@ const VIDEO: &str = "ui-call-video";
 #[derive(Default)]
 pub struct RtcHub {
     inner: Mutex<Option<Session>>,
+    boot: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     trace_seq: AtomicU64,
 }
 
@@ -64,6 +67,7 @@ struct Peer {
     cam: Arc<TrackLocalStaticSample>,
     screen: Arc<TrackLocalStaticSample>,
     making_offer: AtomicBool,
+    ice_retry: AtomicU64,
     pending_ice: StdMutex<Vec<RTCIceCandidateInit>>,
 }
 
@@ -199,7 +203,14 @@ async fn new_pc() -> Result<RTCPeerConnection, String> {
         .map_err(err)?;
     let mut registry = Registry::new();
     registry = register_default_interceptors(registry, &mut media).map_err(err)?;
+    let mut settings = SettingEngine::default();
+    settings.set_ice_timeouts(
+        Some(Duration::from_secs(15)),
+        Some(Duration::from_secs(60)),
+        Some(Duration::from_secs(2)),
+    );
     let api = APIBuilder::new()
+        .with_setting_engine(settings)
         .with_media_engine(media)
         .with_interceptor_registry(registry)
         .build();
@@ -593,11 +604,28 @@ async fn bind_pc(
     let app_pc = app.clone();
     let traces = hub_traces.clone();
     let peer_pc = peer.clone();
+    let pc_watch = pc.clone();
     pc.on_peer_connection_state_change(Box::new(move |st| {
         let app = app_pc.clone();
         let traces = traces.clone();
         let peer = peer_pc.clone();
+        let pc_watch = pc_watch.clone();
         Box::pin(async move {
+            if matches!(
+                st,
+                RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed
+            ) {
+                let live = {
+                    let guard = traces.inner.lock().await;
+                    guard
+                        .as_ref()
+                        .and_then(|s| s.peers.get(&peer))
+                        .is_some_and(|p| Arc::ptr_eq(&p.pc, &pc_watch))
+                };
+                if !live {
+                    return;
+                }
+            }
             let (event, level) = match st {
                 RTCPeerConnectionState::Connecting => ("conectando", "info"),
                 RTCPeerConnectionState::Connected => ("enlace ok", "ok"),
@@ -622,6 +650,7 @@ async fn bind_pc(
             let (event, level) = match st {
                 RTCIceConnectionState::Checking => ("ICE negociando", "info"),
                 RTCIceConnectionState::Connected | RTCIceConnectionState::Completed => {
+                    state(&app).hear_peer(&peer);
                     ("ICE ok", "ok")
                 }
                 RTCIceConnectionState::Disconnected => ("ICE caiu", "warn"),
@@ -630,6 +659,15 @@ async fn bind_pc(
                 _ => return,
             };
             trace(&app, traces.as_ref(), event, level, Some(&peer));
+            if matches!(
+                st,
+                RTCIceConnectionState::Disconnected | RTCIceConnectionState::Failed
+            ) {
+                let hub = traces.clone();
+                tauri::async_runtime::spawn(async move {
+                    relight_ice(hub, peer).await;
+                });
+            }
         })
     }));
 
@@ -672,12 +710,17 @@ async fn bind_pc(
                 }
                 return;
             }
+            let mut ticks = 0u32;
             loop {
                 let Ok((pkt, _)) = track.read_rtp().await else {
                     break;
                 };
                 if pkt.payload.is_empty() {
                     continue;
+                }
+                ticks = ticks.saturating_add(1);
+                if ticks == 1 || ticks % 50 == 0 {
+                    state(&app).hear_peer(&peer);
                 }
                 if !heard.swap(true, Ordering::Relaxed) {
                     trace(
@@ -714,9 +757,13 @@ async fn emit_link(app: &AppHandle, hub: &RtcHub) {
     let mut failed = 0usize;
     let mut connecting = 0usize;
     let n = session.peers.len();
-    for peer in session.peers.values() {
+    let mut heard = Vec::new();
+    for (id, peer) in &session.peers {
         match peer.pc.connection_state() {
-            RTCPeerConnectionState::Connected => live += 1,
+            RTCPeerConnectionState::Connected => {
+                live += 1;
+                heard.push(id.clone());
+            }
             RTCPeerConnectionState::Failed => failed += 1,
             _ => connecting += 1,
         }
@@ -744,14 +791,27 @@ async fn emit_link(app: &AppHandle, hub: &RtcHub) {
             mode: if n <= 1 { "1:1" } else { "mesh" }.into(),
         },
     );
+    drop(guard);
+    for id in heard {
+        state(app).hear_peer(&id);
+    }
 }
 
-async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<Arc<RTCPeerConnection>, String> {
+async fn peer_gate(hub: &RtcHub, peer: &str) -> Arc<Mutex<()>> {
+    let mut boot = hub.boot.lock().await;
+    boot.entry(peer.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<(Arc<RTCPeerConnection>, bool), String> {
+    let gate = peer_gate(&hub, peer).await;
+    let _busy = gate.lock().await;
     {
         let guard = hub.inner.lock().await;
         if let Some(session) = guard.as_ref() {
             if let Some(existing) = session.peers.get(peer) {
-                return Ok(existing.pc.clone());
+                return Ok((existing.pc.clone(), false));
             }
         }
     }
@@ -781,48 +841,34 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<Arc<RTCPeerConnecti
     ));
     let cam = video_sample_track("cam");
     let screen = video_sample_track("screen");
-    bind_pc(
-        app.clone(),
-        hub.clone(),
-        me,
-        room,
-        peer.to_string(),
-        pc.clone(),
-        play,
-        Arc::new(AtomicBool::new(false)),
-    )
-    .await;
-    if pc.get_transceivers().await.is_empty() {
-        for (track, id) in [
-            (
-                Arc::clone(&audio) as Arc<dyn TrackLocal + Send + Sync>,
-                "audio",
-            ),
-            (Arc::clone(&cam) as Arc<dyn TrackLocal + Send + Sync>, "cam"),
-            (
-                Arc::clone(&screen) as Arc<dyn TrackLocal + Send + Sync>,
-                "screen",
-            ),
-        ] {
-            let _ = id;
-            pc.add_transceiver_from_track(
-                track,
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Sendrecv,
-                    send_encodings: vec![],
-                }),
-            )
-            .await
-            .map_err(err)?;
-        }
+    for track in [
+        Arc::clone(&audio) as Arc<dyn TrackLocal + Send + Sync>,
+        Arc::clone(&cam) as Arc<dyn TrackLocal + Send + Sync>,
+        Arc::clone(&screen) as Arc<dyn TrackLocal + Send + Sync>,
+    ] {
+        pc.add_transceiver_from_track(
+            track,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendrecv,
+                send_encodings: vec![],
+            }),
+        )
+        .await
+        .map_err(err)?;
     }
 
     {
         let mut guard = hub.inner.lock().await;
-        let session = guard.as_mut().ok_or("call nativa parada")?;
-        if let Some(existing) = session.peers.get(peer) {
+        let Some(session) = guard.as_mut() else {
+            drop(guard);
             let _ = pc.close().await;
-            return Ok(existing.pc.clone());
+            return Err("call nativa parada".into());
+        };
+        if let Some(existing) = session.peers.get(peer) {
+            let existing_pc = existing.pc.clone();
+            drop(guard);
+            let _ = pc.close().await;
+            return Ok((existing_pc, false));
         }
         session.peers.insert(
             peer.to_string(),
@@ -832,6 +878,7 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<Arc<RTCPeerConnecti
                 cam: cam.clone(),
                 screen: screen.clone(),
                 making_offer: AtomicBool::new(false),
+                ice_retry: AtomicU64::new(0),
                 pending_ice: StdMutex::new(Vec::new()),
             },
         );
@@ -845,8 +892,19 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<Arc<RTCPeerConnecti
             list.push(screen);
         }
     }
+    bind_pc(
+        app.clone(),
+        hub.clone(),
+        me,
+        room,
+        peer.to_string(),
+        pc.clone(),
+        play,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await;
     trace(&app, hub.as_ref(), "enlace aberto", "info", Some(peer));
-    Ok(pc)
+    Ok((pc, true))
 }
 
 async fn flush_ice(peer: &Peer) {
@@ -874,6 +932,9 @@ async fn send_local(
     pc: &RTCPeerConnection,
 ) {
     tokio::time::sleep(Duration::from_millis(400)).await;
+    if kind == "offer" && pc.signaling_state() != RTCSignalingState::HaveLocalOffer {
+        return;
+    }
     let Some(desc) = pc.local_description().await else {
         return;
     };
@@ -899,6 +960,44 @@ async fn send_local(
 }
 
 async fn offer_now(hub: Arc<RtcHub>, peer: &str) -> Result<(), String> {
+    offer_now_opts(hub, peer, false).await
+}
+
+async fn relight_ice(hub: Arc<RtcHub>, peer: String) {
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    let app = {
+        let guard = hub.inner.lock().await;
+        let Some(session) = guard.as_ref() else {
+            return;
+        };
+        if polite(&session.me, &peer) {
+            return;
+        }
+        let Some(p) = session.peers.get(&peer) else {
+            return;
+        };
+        let ice = p.pc.ice_connection_state();
+        if !matches!(
+            ice,
+            RTCIceConnectionState::Disconnected | RTCIceConnectionState::Failed
+        ) {
+            return;
+        }
+        let now = now_ms() as u64;
+        let prev = p.ice_retry.load(Ordering::Relaxed);
+        if now.saturating_sub(prev) < 8000 {
+            return;
+        }
+        p.ice_retry.store(now, Ordering::Relaxed);
+        session.app.clone()
+    };
+    trace(&app, hub.as_ref(), "religando ICE", "warn", Some(&peer));
+    let _ = offer_now_opts(hub, &peer, true).await;
+}
+
+async fn offer_now_opts(hub: Arc<RtcHub>, peer: &str, ice_restart: bool) -> Result<(), String> {
+    let gate = peer_gate(&hub, peer).await;
+    let _busy = gate.lock().await;
     let (app, me, room, pc) = {
         let guard = hub.inner.lock().await;
         let session = guard.as_ref().ok_or("call nativa parada")?;
@@ -918,7 +1017,14 @@ async fn offer_now(hub: Arc<RtcHub>, peer: &str) -> Result<(), String> {
         )
     };
     let result = async {
-        let offer = pc.create_offer(None).await.map_err(err)?;
+        if ice_restart {
+            pc.restart_ice().await.map_err(err)?;
+        }
+        let opts = ice_restart.then_some(RTCOfferOptions {
+            ice_restart: true,
+            ..Default::default()
+        });
+        let offer = pc.create_offer(opts).await.map_err(err)?;
         if pc.signaling_state() != RTCSignalingState::Stable {
             return Ok(());
         }
@@ -1078,14 +1184,7 @@ pub async fn sync(app: &AppHandle, peers: Vec<String>) -> Result<(), String> {
         drop_peer(&hub, id, false).await;
     }
     for id in &want {
-        let created = {
-            let guard = hub.inner.lock().await;
-            !guard
-                .as_ref()
-                .map(|s| s.peers.contains_key(id))
-                .unwrap_or(true)
-        };
-        ensure_peer(hub.clone(), id).await?;
+        let created = ensure_peer(hub.clone(), id).await?.1;
         if created {
             offer_now(hub.clone(), id).await?;
         }
@@ -1108,7 +1207,27 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
         drop_peer(&hub, &frame.from, true).await;
         return Ok(());
     }
-    let pc = ensure_peer(hub.clone(), &frame.from).await?;
+    let pc = ensure_peer(hub.clone(), &frame.from).await?.0;
+    if frame.kind == "ice" {
+        let init = match frame.candidate {
+            None | Some(serde_json::Value::Null) => RTCIceCandidateInit::default(),
+            Some(value) => serde_json::from_value(value).unwrap_or_default(),
+        };
+        if pc.remote_description().await.is_none() {
+            if let Some(session) = hub.inner.lock().await.as_ref() {
+                if let Some(p) = session.peers.get(&frame.from) {
+                    if let Ok(mut q) = p.pending_ice.lock() {
+                        q.push(init);
+                    }
+                }
+            }
+            return Ok(());
+        }
+        let _ = pc.add_ice_candidate(init).await;
+        return Ok(());
+    }
+    let gate = peer_gate(&hub, &frame.from).await;
+    let _busy = gate.lock().await;
     if frame.kind == "offer" {
         if let Some(sdp) = frame.sdp {
             let collision = {
@@ -1119,6 +1238,9 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
                     || p.pc.signaling_state() != RTCSignalingState::Stable
             };
             if collision && !polite(&me, &frame.from) {
+                return Ok(());
+            }
+            if pc.signaling_state() != RTCSignalingState::Stable {
                 return Ok(());
             }
             let desc = RTCSessionDescription::offer(sdp).map_err(err)?;
@@ -1136,33 +1258,22 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
         }
     } else if frame.kind == "answer" {
         if let Some(sdp) = frame.sdp {
-            if pc.signaling_state() == RTCSignalingState::HaveLocalOffer {
-                let desc = RTCSessionDescription::answer(sdp).map_err(err)?;
-                pc.set_remote_description(desc).await.map_err(err)?;
-                if let Some(session) = hub.inner.lock().await.as_ref() {
-                    if let Some(p) = session.peers.get(&frame.from) {
-                        flush_ice(p).await;
-                    }
-                }
-                trace(app, &hub, "resposta recebida", "ok", Some(&frame.from));
+            if pc.signaling_state() != RTCSignalingState::HaveLocalOffer {
+                return Ok(());
             }
-        }
-    } else if frame.kind == "ice" {
-        let init = match frame.candidate {
-            None | Some(serde_json::Value::Null) => RTCIceCandidateInit::default(),
-            Some(value) => serde_json::from_value(value).unwrap_or_default(),
-        };
-        if pc.remote_description().await.is_none() {
+            let desc = RTCSessionDescription::answer(sdp).map_err(err)?;
+            match pc.set_remote_description(desc).await {
+                Ok(()) => {}
+                Err(_) if pc.signaling_state() == RTCSignalingState::Stable => return Ok(()),
+                Err(e) => return Err(err(e)),
+            }
             if let Some(session) = hub.inner.lock().await.as_ref() {
                 if let Some(p) = session.peers.get(&frame.from) {
-                    if let Ok(mut q) = p.pending_ice.lock() {
-                        q.push(init);
-                    }
+                    flush_ice(p).await;
                 }
             }
-            return Ok(());
+            trace(app, &hub, "resposta recebida", "ok", Some(&frame.from));
         }
-        let _ = pc.add_ice_candidate(init).await;
     }
     Ok(())
 }
