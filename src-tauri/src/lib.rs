@@ -106,6 +106,11 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                peer::announce_gone(window.app_handle());
+            }
+        })
         .run(tauri::generate_context!())
         .expect("erro ao abrir o Chaincord");
 }
@@ -136,8 +141,30 @@ fn allow_media(window: WebviewWindow) {
             }
         });
     }
-    #[cfg(not(windows))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
     {
-        let _ = window;
+        let _ = window.with_webview(|webview| {
+            use webkit2gtk::glib::prelude::*;
+            use webkit2gtk::{PermissionRequestExt, SettingsExt, WebViewExt};
+            let view = webview.inner();
+            if let Some(settings) = view.settings() {
+                settings.set_enable_media_stream(true);
+                settings.set_enable_webrtc(true);
+                settings.set_media_playback_requires_user_gesture(false);
+            }
+            view.connect_permission_request(|_, request| {
+                if request.is::<webkit2gtk::UserMediaPermissionRequest>() {
+                    request.allow();
+                    return true;
+                }
+                false
+            });
+        });
     }
 }

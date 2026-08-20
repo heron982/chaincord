@@ -67,7 +67,7 @@ fn offline_status() -> String {
     "offline".into()
 }
 
-const PRESENCE_TTL_MS: i64 = 70_000;
+const PRESENCE_TTL_MS: i64 = 35_000;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct UiMessage {
@@ -114,6 +114,7 @@ struct Inner {
 pub struct AppState {
     inner: Mutex<Inner>,
     remotes: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
+    link_pks: Mutex<HashMap<String, String>>,
     store: Mutex<Option<Store>>,
     pending: AtomicU64,
     relay_gen: AtomicU64,
@@ -147,6 +148,7 @@ impl AppState {
                 seeding: HashSet::new(),
             }),
             remotes: Mutex::new(HashMap::new()),
+            link_pks: Mutex::new(HashMap::new()),
             store: Mutex::new(None),
             pending: AtomicU64::new(1),
             relay_gen: AtomicU64::new(0),
@@ -980,6 +982,42 @@ fn seeding_visible(inner: &Inner) -> bool {
     !inner.seeding.is_empty()
 }
 
+pub(crate) fn goodbye_json(app: &AppHandle) -> String {
+    let state = state_of(app);
+    let inner = state.inner.lock().expect("state");
+    serde_json::json!({
+        "type": "presence",
+        "publicKey": inner.identity.public_hex(),
+        "displayName": inner.display_name,
+        "status": "offline",
+        "muted": inner.muted,
+        "deafened": inner.deafened,
+    })
+    .to_string()
+}
+
+pub fn announce_gone(app: &AppHandle) {
+    let state = state_of(app);
+    let (pk, rooms) = {
+        let mut inner = state.inner.lock().expect("state");
+        if inner.community.is_none() {
+            return;
+        }
+        inner.status = "offline".into();
+        let pk = inner.identity.public_hex();
+        let rooms = drop_from_voice(&mut inner, &pk);
+        (pk, rooms)
+    };
+    fanout(&state, &goodbye_json(app), None);
+    fanout_voice_leaves(
+        &state,
+        &rooms
+            .into_iter()
+            .map(|room| (pk.clone(), room))
+            .collect::<Vec<_>>(),
+    );
+}
+
 fn presence_json(state: &AppState) -> String {
     let inner = state.inner.lock().expect("state");
     presence_frame(&inner, false)
@@ -1134,6 +1172,67 @@ fn mark_peer_offline(inner: &mut Inner, pk: &str) -> Vec<String> {
         profile.status = "offline".into();
     }
     drop_from_voice(inner, pk)
+}
+
+fn drop_disconnected_peer(inner: &mut Inner, pk: &str) -> Vec<(String, String)> {
+    if pk.is_empty() || pk == inner.identity.public_hex() {
+        return Vec::new();
+    }
+    mark_peer_offline(inner, pk)
+        .into_iter()
+        .map(|room| (pk.to_string(), room))
+        .collect()
+}
+
+fn remember_link_pk(state: &AppState, url: Option<&str>, pk: &str) {
+    let Some(url) = url else {
+        return;
+    };
+    if url.is_empty() || url == "relay" || pk.is_empty() {
+        return;
+    }
+    state
+        .link_pks
+        .lock()
+        .expect("link_pks")
+        .insert(url.to_string(), pk.to_string());
+}
+
+fn on_peer_socket_closed(app: &AppHandle, url: Option<String>) {
+    let Some(url) = url else {
+        return;
+    };
+    let state = state_of(app);
+    state.remotes.lock().expect("remotes").remove(&url);
+    if url == "relay" {
+        emit_state(app);
+        return;
+    }
+    let pk = {
+        let mut map = state.link_pks.lock().expect("link_pks");
+        let pk = map.remove(&url);
+        if let Some(ref pk) = pk {
+            map.retain(|_, v| v != pk);
+        }
+        pk
+    };
+    let Some(pk) = pk else {
+        emit_state(app);
+        return;
+    };
+    let leaves = {
+        let mut inner = state.inner.lock().expect("state");
+        drop_disconnected_peer(&mut inner, &pk)
+    };
+    let gone = serde_json::json!({
+        "type": "presence",
+        "publicKey": pk,
+        "status": "offline",
+    })
+    .to_string();
+    fanout(&state, &gone, None);
+    fanout_voice_leaves(&state, &leaves);
+    emit_state(app);
 }
 
 fn voice_leave_json(room: &str, pk: &str) -> String {
@@ -1419,14 +1518,7 @@ async fn serve_connected<S>(
         }
     }
 
-    if let Some(url) = known_url {
-        state_of(&app)
-            .remotes
-            .lock()
-            .expect("remotes")
-            .remove(&url);
-        emit_state(&app);
-    }
+    on_peer_socket_closed(&app, known_url);
 }
 
 fn handle_remote(
@@ -1477,6 +1569,10 @@ fn handle_remote(
                 apply_presence(&mut inner, &frame, false);
             }
             let hello_pk = json_str(frame.get("publicKey"));
+            remember_link_pk(&state, from_url.as_deref(), &hello_pk);
+            if !listen.is_empty() {
+                remember_link_pk(&state, Some(listen.as_str()), &hello_pk);
+            }
             let their_history = frame
                 .get("historyCount")
                 .and_then(|v| v.as_u64())
@@ -2173,6 +2269,28 @@ mod tests {
         assert_eq!(live_status(&inner, "aa", now), "away");
         expire_stale_presence(&mut inner, now + PRESENCE_TTL_MS + 1);
         assert_eq!(live_status(&inner, "aa", now + PRESENCE_TTL_MS + 1), "offline");
+    }
+
+    #[test]
+    fn socket_drop_removes_peer_from_call() {
+        let mut inner = sample_inner();
+        inner.profiles.insert(
+            "aa".into(),
+            PeerProfile {
+                display_name: "Ana".into(),
+                status: "online".into(),
+                ..PeerProfile::default()
+            },
+        );
+        inner
+            .voice
+            .insert("lobby".into(), HashSet::from(["aa".into(), "bb".into()]));
+        inner.last_seen.insert("aa".into(), now_ms());
+        let leaves = drop_disconnected_peer(&mut inner, "aa");
+        assert_eq!(leaves, vec![("aa".to_string(), "lobby".to_string())]);
+        assert!(!inner.voice.get("lobby").unwrap().contains("aa"));
+        assert!(inner.voice.get("lobby").unwrap().contains("bb"));
+        assert_eq!(live_status(&inner, "aa", now_ms()), "offline");
     }
 
     #[test]

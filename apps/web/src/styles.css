@@ -238,7 +238,7 @@ button, input, textarea { font: inherit; }
 }
 .stage-body {
   flex: 1;
-  min-height: 0;
+  min-height: 160px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -257,10 +257,10 @@ button, input, textarea { font: inherit; }
 }
 .tiles {
   flex: 1;
-  min-height: 0;
+  min-height: 160px;
   display: grid;
   gap: 8px;
-  grid-auto-rows: minmax(0, 1fr);
+  grid-auto-rows: minmax(160px, 1fr);
 }
 .tiles.strip-bottom {
   flex: 0 0 108px;
@@ -282,6 +282,7 @@ button, input, textarea { font: inherit; }
   place-items: center;
   border: 2px solid transparent;
   width: 100%;
+  height: 100%;
   padding: 0;
   color: inherit;
   font: inherit;

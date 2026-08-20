@@ -70,7 +70,7 @@ async fn run_session(
         if !peer::relay_is_current(app, gen) {
             return Ok(());
         }
-        match connect_mqtt(&url, client_id).await {
+        match connect_mqtt(&url, client_id, &topic(community_id), &peer::goodbye_json(app)).await {
             Ok(ws) => {
                 return pump(app, gen, community_id, ws).await;
             }
@@ -83,6 +83,8 @@ async fn run_session(
 async fn connect_mqtt(
     url: &str,
     client_id: &str,
+    will_topic: &str,
+    will_payload: &str,
 ) -> Result<
     tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -100,7 +102,9 @@ async fn connect_mqtt(
         .await
         .map_err(|_| "tempo esgotado".to_string())?
         .map_err(|e| e.to_string())?;
-    ws.send(Message::Binary(mqtt_connect(client_id).into()))
+    ws.send(Message::Binary(
+        mqtt_connect(client_id, will_topic, will_payload.as_bytes()).into(),
+    ))
         .await
         .map_err(|e| e.to_string())?;
     let connack = tokio::time::timeout(Duration::from_secs(8), ws.next())
@@ -339,12 +343,15 @@ fn packet(header: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-fn mqtt_connect(client_id: &str) -> Vec<u8> {
+fn mqtt_connect(client_id: &str, will_topic: &str, will_payload: &[u8]) -> Vec<u8> {
     let mut payload = mqtt_str("MQTT");
     payload.push(4);
-    payload.push(0x02);
+    payload.push(0x0E);
     payload.extend_from_slice(&60u16.to_be_bytes());
     payload.extend(mqtt_str(client_id));
+    payload.extend(mqtt_str(will_topic));
+    payload.extend_from_slice(&(will_payload.len() as u16).to_be_bytes());
+    payload.extend_from_slice(will_payload);
     packet(0x10, &payload)
 }
 
@@ -524,5 +531,36 @@ mod tests {
     #[test]
     fn compact_wire_leaves_invalid_json_alone() {
         assert_eq!(compact_wire("not-json"), "not-json");
+    }
+
+    #[test]
+    fn mqtt_connect_sets_last_will() {
+        let will = br#"{"type":"presence","status":"offline"}"#;
+        let packet = mqtt_connect("ccabc", "cc/v1/room", will);
+        assert_eq!(packet[0], 0x10);
+        let mut idx = 1usize;
+        loop {
+            let byte = packet[idx];
+            idx += 1;
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        let proto_len = u16::from_be_bytes([packet[idx], packet[idx + 1]]) as usize;
+        idx += 2 + proto_len;
+        idx += 1;
+        let flags = packet[idx];
+        assert_eq!(flags & 0x04, 0x04);
+        assert_eq!((flags & 0x18) >> 3, 1);
+        idx += 1 + 2;
+        let id_len = u16::from_be_bytes([packet[idx], packet[idx + 1]]) as usize;
+        idx += 2 + id_len;
+        let topic_len = u16::from_be_bytes([packet[idx], packet[idx + 1]]) as usize;
+        idx += 2;
+        assert_eq!(&packet[idx..idx + topic_len], b"cc/v1/room");
+        idx += topic_len;
+        let will_len = u16::from_be_bytes([packet[idx], packet[idx + 1]]) as usize;
+        idx += 2;
+        assert_eq!(&packet[idx..idx + will_len], will);
     }
 }
