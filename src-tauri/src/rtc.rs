@@ -234,16 +234,16 @@ async fn new_pc() -> Result<RTCPeerConnection, String> {
         .register_codec(pcmu_codec(), RTPCodecType::Audio)
         .map_err(err)?;
     media
-        .register_codec(h264_codec_at(125, "42e01f", 1), RTPCodecType::Video)
+        .register_codec(h264_codec_at(102, "42e01f", 1), RTPCodecType::Video)
         .map_err(err)?;
     media
-        .register_codec(h264_codec_at(124, "42001f", 1), RTPCodecType::Video)
+        .register_codec(h264_codec_at(103, "42001f", 1), RTPCodecType::Video)
         .map_err(err)?;
     media
-        .register_codec(h264_codec_at(123, "4d001f", 1), RTPCodecType::Video)
+        .register_codec(h264_codec_at(104, "4d001f", 1), RTPCodecType::Video)
         .map_err(err)?;
     media
-        .register_codec(h264_codec_at(122, "42e01f", 0), RTPCodecType::Video)
+        .register_codec(h264_codec_at(105, "42e01f", 0), RTPCodecType::Video)
         .map_err(err)?;
     let mut registry = Registry::new();
     registry = register_default_interceptors(registry, &mut media).map_err(err)?;
@@ -625,20 +625,32 @@ fn spawn_video_send(
         let mut announced = false;
         while enc_run.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(VIDEO_MS));
-            let Some(frame) = jpeg.lock().ok().and_then(|g| g.clone()) else {
-                continue;
+            ticks = ticks.saturating_add(1);
+            let live = jpeg.lock().ok().and_then(|g| g.clone());
+            let (frame, real) = match live {
+                Some(frame) => (frame, true),
+                None if ticks % 5 == 1 => {
+                    let rgb = vec![0u8; 320 * 176 * 3];
+                    let Some(keep) = rgb_jpeg(320, 176, &rgb) else {
+                        continue;
+                    };
+                    (keep, false)
+                }
+                None => continue,
             };
-            ticks += 1;
-            if ticks == 1 || ticks % 12 == 0 {
+            if !real || ticks % 12 == 0 {
                 encoder.force_intra_frame();
             }
             let Some(h264) = jpeg_to_h264(&mut encoder, &frame) else {
+                if let Ok(next) = video_encoder(screen) {
+                    encoder = next;
+                }
                 continue;
             };
             if h264.is_empty() {
                 continue;
             }
-            if !announced {
+            if real && !announced {
                 announced = true;
                 trace(
                     &app,
@@ -1543,6 +1555,9 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
             if pc.signaling_state() != RTCSignalingState::HaveLocalOffer {
                 return Ok(());
             }
+            let sdp_up = sdp.to_ascii_uppercase();
+            let has_h264 = sdp_up.contains("H264");
+            let has_vp8 = sdp_up.contains("VP8");
             let desc = RTCSessionDescription::answer(sdp).map_err(err)?;
             match pc.set_remote_description(desc).await {
                 Ok(()) => {}
@@ -1554,7 +1569,13 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
                     flush_ice(p).await;
                 }
             }
-            trace(app, &hub, "resposta recebida", "ok", Some(&frame.from));
+            trace(
+                app,
+                &hub,
+                &format!("resposta recebida h264={has_h264} vp8={has_vp8}"),
+                if has_h264 { "ok" } else { "err" },
+                Some(&frame.from),
+            );
         }
     }
     Ok(())

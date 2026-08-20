@@ -467,6 +467,7 @@ export class CallNet {
         await this.flushIce(frame.from);
         await this.waitForMic(800);
         this.bindSenders(pc, frame.from);
+        this.preferH264IfLinux(pc, frame.sdp);
         await this.pushLocal(frame.from);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -701,6 +702,13 @@ export class CallNet {
       this.resendLocal(peer, pc);
     };
 
+    pc.onnegotiationneeded = () => {
+      if (this.stopped || this.pcs.get(peer) !== pc) return;
+      if (rtcPolite(this.me, peer)) return;
+      if (pc.signalingState !== "stable") return;
+      void this.enqueue(peer, () => this.offerNow(peer));
+    };
+
     pc.ontrack = (ev) => {
       if (!ev.track) return;
       const publish = () => {
@@ -837,10 +845,6 @@ export class CallNet {
       if (rtcPolite(this.me, peer)) continue;
       const pc = this.pcs.get(peer);
       if (!pc || pc.signalingState !== "stable") continue;
-      if (pc.connectionState === "connected") {
-        void this.pushLocal(peer);
-        continue;
-      }
       void this.enqueue(peer, () => this.offerNow(peer));
     }
   }
@@ -870,6 +874,23 @@ export class CallNet {
     this.camSenders.set(peer, cam.sender);
     this.screenSenders.set(peer, screen.sender);
     this.screenXcvr.set(peer, screen);
+  }
+
+  private preferH264IfLinux(pc: RTCPeerConnection, sdp?: string) {
+    if (!sdp || /vp8/i.test(sdp)) return;
+    const caps = RTCRtpSender.getCapabilities?.("video");
+    if (!caps?.codecs.length) return;
+    const h264 = caps.codecs.filter((codec) => /h264/i.test(codec.mimeType));
+    if (!h264.length) return;
+    const rtx = caps.codecs.filter((codec) => /rtx/i.test(codec.mimeType));
+    for (const xcvr of pc.getTransceivers()) {
+      if (this.xcvrKind(xcvr) !== "video") continue;
+      try {
+        xcvr.setCodecPreferences([...h264, ...rtx]);
+      } catch {
+        /* older chromium */
+      }
+    }
   }
 
   private xcvrKind(t: RTCRtpTransceiver): string | undefined {
@@ -936,31 +957,66 @@ export class CallNet {
       if (pc) this.bindSenders(pc, peer);
       await this.attachTrack(this.audioSenders.get(peer), audio);
       await this.attachTrack(this.camSenders.get(peer), video);
-      await this.attachTrack(this.screenSenders.get(peer), scr);
-      if (scr && !this.screenSenders.get(peer) && !this.seenScreen.has(`send:${peer}`)) {
+      const screenSender = this.screenSenders.get(peer);
+      const screenOk = await this.attachTrack(screenSender, scr);
+      if (scr && !screenSender && !this.seenScreen.has(`send:${peer}`)) {
         this.seenScreen.add(`send:${peer}`);
         this.trace("tela sem canal de envio", "warn", peer);
-      } else if (scr && this.screenSenders.get(peer) && !this.seenScreen.has(`send:${peer}`)) {
+      } else if (scr && screenOk && screenSender?.track?.id === scr.id && !this.seenScreen.has(`send:${peer}`)) {
         this.seenScreen.add(`send:${peer}`);
         this.trace("tela anexada", "info", peer);
+        window.setTimeout(() => void this.logScreenBytes(peer, screenSender), 1500);
+      } else if (scr && !screenOk && !this.seenScreen.has(`fail:${peer}`)) {
+        this.seenScreen.add(`fail:${peer}`);
+        this.trace("tela não anexou", "err", peer);
       } else if (!scr) {
         this.seenScreen.delete(`send:${peer}`);
+        this.seenScreen.delete(`fail:${peer}`);
       }
     }
   }
 
+  private async logScreenBytes(peer: string, sender?: RTCRtpSender) {
+    if (!sender || this.stopped || !this.screen?.getVideoTracks().length) return;
+    try {
+      const stats = await sender.getStats();
+      const codecs = new Map<string, string>();
+      let bytes = 0;
+      let codecId = "";
+      for (const report of stats.values()) {
+        if (report.type === "codec" && typeof report.mimeType === "string") {
+          codecs.set(report.id, report.mimeType);
+        }
+        if (report.type === "outbound-rtp" && report.kind === "video") {
+          bytes += Number(report.bytesSent ?? 0);
+          if (typeof report.codecId === "string") codecId = report.codecId;
+        }
+      }
+      const mime = codecs.get(codecId) ?? "";
+      this.trace(
+        bytes > 0 ? `tela ${bytes} B ${mime}` : `tela 0 B ${mime || "sem RTP"}`,
+        bytes > 0 ? "ok" : "warn",
+        peer,
+      );
+    } catch {
+      /* stats unavailable */
+    }
+  }
+
   private async attachTrack(sender: RTCRtpSender | undefined, track: MediaStreamTrack | null) {
-    if (!sender) return;
-    if (sender.track?.id === (track?.id ?? null)) return;
+    if (!sender) return false;
+    if (sender.track?.id === (track?.id ?? null)) return true;
     const audioSender = Boolean(sender.dtmf);
     if (track) {
-      if (audioSender && track.kind !== "audio") return;
-      if (!audioSender && track.kind !== "video") return;
+      if (audioSender && track.kind !== "audio") return false;
+      if (!audioSender && track.kind !== "video") return false;
     }
     try {
       await sender.replaceTrack(track);
-    } catch {
-      /* sender not ready or kind mismatch */
+      return !track || sender.track?.id === track.id;
+    } catch (err) {
+      this.trace(`replaceTrack: ${String(err)}`, "err");
+      return false;
     }
   }
 
