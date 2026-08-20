@@ -485,8 +485,8 @@ fn rgb_jpeg(w: u32, h: u32, rgb: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let mut img = image::RgbImage::from_raw(w, h, rgb[..need].to_vec())?;
-    if w > 960 {
-        let nw = 960u32 & !1;
+    if w > 640 {
+        let nw = 640u32 & !1;
         let nh = ((h as u64 * nw as u64) / w as u64) as u32 & !1;
         img = image::imageops::resize(
             &img,
@@ -497,7 +497,7 @@ fn rgb_jpeg(w: u32, h: u32, rgb: &[u8]) -> Option<Vec<u8>> {
     }
     let (ow, oh) = img.dimensions();
     let mut buf = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 52)
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 40)
         .encode(img.as_raw(), ow, oh, image::ExtendedColorType::Rgb8)
         .ok()?;
     Some(buf)
@@ -719,6 +719,9 @@ fn spawn_video_recv(
                         );
                     }
                     emit_video(&app, &peer, screen, &jpeg);
+                    if !screen && w >= 800 {
+                        emit_video(&app, &peer, true, &jpeg);
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -872,7 +875,7 @@ async fn bind_pc(
             if track.kind() != RTPCodecType::Audio {
                 let mid = xcvr.mid();
                 let stream_id = track.stream_id();
-                let screen = matches!(mid.as_deref(), Some("2"))
+                let screen = !matches!(mid.as_deref(), Some("0") | Some("1"))
                     || stream_id.to_lowercase().contains("screen")
                     || stream_id.to_lowercase().contains("display");
                 let tx = spawn_video_recv(app.clone(), traces.clone(), peer.clone(), screen);
@@ -892,21 +895,24 @@ async fn bind_pc(
                                 saw_rtp = true;
                                 state(&app).hear_peer(&peer);
                                 let codec = track.codec().capability.mime_type;
+                                let label = if codec.is_empty() {
+                                    "H264"
+                                } else {
+                                    &codec
+                                };
+                                let h264 = label.to_ascii_lowercase().contains("h264");
                                 trace(
                                     &app,
                                     traces.as_ref(),
-                                    &format!(
-                                        "vídeo RTP {} mid={}",
-                                        if codec.is_empty() { "H264" } else { &codec },
-                                        mid.as_deref().unwrap_or("?")
-                                    ),
-                                    "info",
+                                    &format!("vídeo RTP {label} mid={}", mid.as_deref().unwrap_or("?")),
+                                    if h264 { "info" } else { "err" },
                                     Some(&peer),
                                 );
                             }
                             if last_ts.is_some_and(|ts| ts != pkt.header.timestamp) && !acc.is_empty()
                             {
                                 let _ = tx.try_send(std::mem::take(&mut acc));
+                                depacketizer = H264Packet::default();
                             }
                             last_ts = Some(pkt.header.timestamp);
                             if let Ok(nal) = depacketizer.depacketize(&pkt.payload) {
@@ -1515,7 +1521,22 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
             let answer = pc.create_answer(None).await.map_err(err)?;
             pc.set_local_description(answer).await.map_err(err)?;
             send_local(app, &me, &room, &frame.from, "answer", pc.as_ref()).await;
-            trace(app, &hub, "resposta enviada", "info", Some(&frame.from));
+            let video_ok = pc
+                .local_description()
+                .await
+                .map(|d| d.sdp.to_ascii_uppercase().contains("H264"))
+                .unwrap_or(false);
+            trace(
+                app,
+                &hub,
+                if video_ok {
+                    "resposta enviada"
+                } else {
+                    "resposta sem H264"
+                },
+                if video_ok { "info" } else { "err" },
+                Some(&frame.from),
+            );
         }
     } else if frame.kind == "answer" {
         if let Some(sdp) = frame.sdp {

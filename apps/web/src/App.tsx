@@ -15,7 +15,7 @@ import {
   rtcPeerConnectionMissing,
   type UiState,
 } from "./backend";
-import { CallNet, type CallLink, type CallTrace, type RemoteMedia } from "./call";
+import { CallNet, lastNativeFrame, type CallLink, type CallTrace, type RemoteMedia } from "./call";
 import {
   callPathHint,
   effectivePresence,
@@ -1400,8 +1400,14 @@ function RemoteAudio({ stream, muted }: { stream: MediaStream; muted: boolean })
 
 function FrameImg({ tileId }: { tileId: string }) {
   const ref = useRef<HTMLImageElement>(null);
-  const [has, setHas] = useState(false);
+  const [has, setHas] = useState(() => Boolean(lastNativeFrame(tileId)));
   useEffect(() => {
+    const img = ref.current;
+    const existing = lastNativeFrame(tileId);
+    if (img && existing) {
+      img.src = existing;
+      setHas(true);
+    }
     const on = (e: Event) => {
       const detail = (e as CustomEvent<{ id: string; url: string }>).detail;
       if (!detail || detail.id !== tileId || !ref.current) return;

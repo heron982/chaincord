@@ -59,6 +59,19 @@ export type CallTrace = {
   level: "info" | "ok" | "warn" | "err";
 };
 
+const nativeFrameUrls = new Map<string, string>();
+
+export function lastNativeFrame(id: string): string {
+  return nativeFrameUrls.get(id) ?? "";
+}
+
+function jpegToUrl(jpeg: string): string {
+  const bin = atob(jpeg);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+}
+
 const iceServers: RTCIceServer[] = [
   { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
   { urls: "stun:stun.cloudflare.com:3478" },
@@ -220,7 +233,11 @@ export class CallNet {
 
   private ingestNativeFrame(peer: string, screen: boolean, jpeg: string) {
     const id = screen ? `screen:${peer}` : `user:${peer}`;
-    const url = jpeg ? `data:image/jpeg;base64,${jpeg}` : "";
+    const prev = nativeFrameUrls.get(id);
+    if (prev) URL.revokeObjectURL(prev);
+    const url = jpeg ? jpegToUrl(jpeg) : "";
+    if (url) nativeFrameUrls.set(id, url);
+    else nativeFrameUrls.delete(id);
     window.dispatchEvent(new CustomEvent("chaincord-frame", { detail: { id, url } }));
     const key = `${peer}:${screen ? "s" : "c"}`;
     if (jpeg && !this.nativeSeen.has(key)) {
