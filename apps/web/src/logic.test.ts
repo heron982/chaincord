@@ -23,6 +23,7 @@ import {
   iceTraceText,
   iceTraceLevel,
   pickCallTransceivers,
+  preferH264Codecs,
   toggleCallFocus,
   trackLooksLive,
   remoteScreenVisible,
@@ -270,5 +271,14 @@ describe("call negotiation", () => {
     expect(reordered.audio).toBe(1);
     expect(reordered.cam).toBe(2);
     expect(reordered.screen).toBe(0);
+  });
+
+  it("puts H264 first so Linux can decode screen share", () => {
+    const ranked = preferH264Codecs([
+      { mimeType: "video/VP8" },
+      { mimeType: "video/H264" },
+      { mimeType: "video/rtx" },
+    ]);
+    expect(ranked.map((c) => c.mimeType)).toEqual(["video/H264", "video/rtx"]);
   });
 });

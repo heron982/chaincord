@@ -211,10 +211,18 @@ fn h264_cap() -> RTCRtpCodecCapability {
     }
 }
 
-fn h264_codec() -> RTCRtpCodecParameters {
+fn h264_codec_at(pt: u8, profile: &str, mode: u8) -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
-        capability: h264_cap(),
-        payload_type: 125,
+        capability: RTCRtpCodecCapability {
+            mime_type: MIME_TYPE_H264.to_owned(),
+            clock_rate: 90000,
+            sdp_fmtp_line: format!(
+                "level-asymmetry-allowed=1;packetization-mode={mode};profile-level-id={profile}"
+            ),
+            rtcp_feedback: h264_feedback(),
+            ..Default::default()
+        },
+        payload_type: pt,
         ..Default::default()
     }
 }
@@ -225,7 +233,16 @@ async fn new_pc() -> Result<RTCPeerConnection, String> {
         .register_codec(pcmu_codec(), RTPCodecType::Audio)
         .map_err(err)?;
     media
-        .register_codec(h264_codec(), RTPCodecType::Video)
+        .register_codec(h264_codec_at(125, "42e01f", 1), RTPCodecType::Video)
+        .map_err(err)?;
+    media
+        .register_codec(h264_codec_at(124, "42001f", 1), RTPCodecType::Video)
+        .map_err(err)?;
+    media
+        .register_codec(h264_codec_at(123, "4d001f", 1), RTPCodecType::Video)
+        .map_err(err)?;
+    media
+        .register_codec(h264_codec_at(122, "42e01f", 0), RTPCodecType::Video)
         .map_err(err)?;
     let mut registry = Registry::new();
     registry = register_default_interceptors(registry, &mut media).map_err(err)?;
@@ -462,9 +479,25 @@ fn even_rgb(jpeg: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 fn rgb_jpeg(w: u32, h: u32, rgb: &[u8]) -> Option<Vec<u8>> {
+    let need = w.checked_mul(h)?.checked_mul(3)? as usize;
+    if rgb.len() < need {
+        return None;
+    }
+    let mut img = image::RgbImage::from_raw(w, h, rgb[..need].to_vec())?;
+    if w > 960 {
+        let nw = 960u32 & !1;
+        let nh = ((h as u64 * nw as u64) / w as u64) as u32 & !1;
+        img = image::imageops::resize(
+            &img,
+            nw.max(2),
+            nh.max(2),
+            image::imageops::FilterType::Triangle,
+        );
+    }
+    let (ow, oh) = img.dimensions();
     let mut buf = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 52)
-        .encode(rgb, w, h, image::ExtendedColorType::Rgb8)
+        .encode(img.as_raw(), ow, oh, image::ExtendedColorType::Rgb8)
         .ok()?;
     Some(buf)
 }
@@ -474,15 +507,6 @@ fn jpeg_to_h264(encoder: &mut openh264::encoder::Encoder, jpeg: &[u8]) -> Option
     let src = openh264::formats::RgbSliceU8::new(&rgb, (w as usize, h as usize));
     let yuv = openh264::formats::YUVBuffer::from_rgb8_source(src);
     encoder.encode(&yuv).ok().map(|bs| bs.to_vec())
-}
-
-fn h264_to_jpeg(decoder: &mut openh264::decoder::Decoder, nals: &[u8]) -> Option<Vec<u8>> {
-    use openh264::formats::YUVSource;
-    let yuv = decoder.decode(nals).ok().flatten()?;
-    let mut rgb = vec![0u8; yuv.estimate_rgb_u8_size()];
-    yuv.write_rgb8(&mut rgb);
-    let (w, h) = yuv.dimensions();
-    rgb_jpeg(w as u32, h as u32, &rgb)
 }
 
 fn video_encoder(screen: bool) -> Result<openh264::encoder::Encoder, openh264::Error> {
@@ -580,31 +604,54 @@ fn spawn_video_recv(
     peer: String,
     screen: bool,
 ) -> std::sync::mpsc::SyncSender<Vec<u8>> {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
     std::thread::spawn(move || {
         let Ok(mut decoder) = openh264::decoder::Decoder::new() else {
+            trace(&app, traces.as_ref(), "decoder H264 falhou", "err", Some(&peer));
             return;
         };
         let mut seen = false;
+        let mut decode_err = 0u32;
         while let Ok(nals) = rx.recv() {
-            let Some(jpeg) = h264_to_jpeg(&mut decoder, &nals) else {
-                continue;
-            };
-            if !seen {
-                seen = true;
-                trace(
-                    &app,
-                    traces.as_ref(),
-                    if screen {
-                        "tela chegou"
-                    } else {
-                        "vídeo chegou"
-                    },
-                    "ok",
-                    Some(&peer),
-                );
+            match decoder.decode(&nals) {
+                Ok(Some(yuv)) => {
+                    use openh264::formats::YUVSource;
+                    let mut rgb = vec![0u8; yuv.estimate_rgb_u8_size()];
+                    yuv.write_rgb8(&mut rgb);
+                    let (w, h) = yuv.dimensions();
+                    let Some(jpeg) = rgb_jpeg(w as u32, h as u32, &rgb) else {
+                        continue;
+                    };
+                    if !seen {
+                        seen = true;
+                        trace(
+                            &app,
+                            traces.as_ref(),
+                            if screen {
+                                "tela chegou"
+                            } else {
+                                "vídeo chegou"
+                            },
+                            "ok",
+                            Some(&peer),
+                        );
+                    }
+                    emit_video(&app, &peer, screen, &jpeg);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    decode_err = decode_err.saturating_add(1);
+                    if decode_err <= 3 {
+                        trace(
+                            &app,
+                            traces.as_ref(),
+                            &format!("H264: {e}"),
+                            "warn",
+                            Some(&peer),
+                        );
+                    }
+                }
             }
-            emit_video(&app, &peer, screen, &jpeg);
         }
     });
     tx
@@ -742,25 +789,76 @@ async fn bind_pc(
         Box::pin(async move {
             if track.kind() != RTPCodecType::Audio {
                 let mid = xcvr.mid();
-                let screen = matches!(mid.as_deref(), Some("2"));
-                let tx = spawn_video_recv(app, traces, peer, screen);
+                let stream_id = track.stream_id();
+                let screen = matches!(mid.as_deref(), Some("2"))
+                    || stream_id.to_lowercase().contains("screen")
+                    || stream_id.to_lowercase().contains("display");
+                let tx = spawn_video_recv(app.clone(), traces.clone(), peer.clone(), screen);
                 let mut depacketizer = H264Packet::default();
                 let mut acc = Vec::new();
+                let mut last_ts: Option<u32> = None;
+                let mut saw_rtp = false;
+                let mut consecutive_err = 0u32;
                 loop {
-                    let Ok((pkt, _)) = track.read_rtp().await else {
-                        break;
-                    };
-                    if pkt.payload.is_empty() {
-                        continue;
-                    }
-                    if let Ok(nal) = depacketizer.depacketize(&pkt.payload) {
-                        acc.extend_from_slice(&nal);
-                    }
-                    if pkt.header.marker && !acc.is_empty() {
-                        let _ = tx.try_send(std::mem::take(&mut acc));
-                    }
-                    if acc.len() > 1_000_000 {
-                        acc.clear();
+                    match track.read_rtp().await {
+                        Ok((pkt, _)) => {
+                            consecutive_err = 0;
+                            if pkt.payload.is_empty() {
+                                continue;
+                            }
+                            if !saw_rtp {
+                                saw_rtp = true;
+                                state(&app).hear_peer(&peer);
+                                let codec = track.codec().capability.mime_type;
+                                trace(
+                                    &app,
+                                    traces.as_ref(),
+                                    &format!(
+                                        "vídeo RTP {} mid={}",
+                                        if codec.is_empty() { "H264" } else { &codec },
+                                        mid.as_deref().unwrap_or("?")
+                                    ),
+                                    "info",
+                                    Some(&peer),
+                                );
+                            }
+                            if last_ts.is_some_and(|ts| ts != pkt.header.timestamp) && !acc.is_empty()
+                            {
+                                let _ = tx.try_send(std::mem::take(&mut acc));
+                            }
+                            last_ts = Some(pkt.header.timestamp);
+                            if let Ok(nal) = depacketizer.depacketize(&pkt.payload) {
+                                if !nal.is_empty() {
+                                    acc.extend_from_slice(&nal);
+                                }
+                            }
+                            if pkt.header.marker && !acc.is_empty() {
+                                let _ = tx.try_send(std::mem::take(&mut acc));
+                            }
+                            if acc.len() > 1_000_000 {
+                                acc.clear();
+                            }
+                        }
+                        Err(e) => {
+                            consecutive_err = consecutive_err.saturating_add(1);
+                            if consecutive_err == 1 {
+                                trace(
+                                    &app,
+                                    traces.as_ref(),
+                                    &format!("vídeo RTP: {e}"),
+                                    "warn",
+                                    Some(&peer),
+                                );
+                            }
+                            let why = e.to_string().to_lowercase();
+                            if consecutive_err > 30
+                                || why.contains("closed")
+                                || why.contains("eof")
+                            {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                        }
                     }
                 }
                 return;
