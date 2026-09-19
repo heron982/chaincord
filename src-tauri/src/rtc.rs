@@ -603,7 +603,7 @@ fn spawn_screen_cap(
                     trace(
                         &app,
                         traces.as_ref(),
-                        "captura de tela falhou",
+                        "screen capture failed",
                         "warn",
                         None,
                     );
@@ -613,7 +613,7 @@ fn spawn_screen_cap(
             };
             if !announced {
                 announced = true;
-                trace(&app, traces.as_ref(), "tela nativa enviando", "ok", None);
+                trace(&app, traces.as_ref(), "native screen sending", "ok", None);
             }
             if let Ok(mut g) = jpeg.lock() {
                 *g = Some(frame.clone());
@@ -658,7 +658,7 @@ fn spawn_video_send(
     let enc_run = running.clone();
     std::thread::spawn(move || {
         let Ok(mut encoder) = video_encoder(screen) else {
-            trace(&app, traces.as_ref(), &format!("{label} encoder falhou"), "err", None);
+            trace(&app, traces.as_ref(), &format!("{label} encoder failed"), "err", None);
             return;
         };
         let mut ticks = 0u32;
@@ -695,7 +695,7 @@ fn spawn_video_send(
                 trace(
                     &app,
                     traces.as_ref(),
-                    &format!("{label} enviando"),
+                    &format!("{label} sending"),
                     "ok",
                     None,
                 );
@@ -816,7 +816,7 @@ fn spawn_video_recv(
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
     std::thread::spawn(move || {
         let Ok(mut decoder) = openh264::decoder::Decoder::new() else {
-            trace(&app, traces.as_ref(), "decoder H264 falhou", "err", Some(&peer));
+            trace(&app, traces.as_ref(), "H264 decoder failed", "err", Some(&peer));
             return;
         };
         let mut seen = false;
@@ -837,9 +837,9 @@ fn spawn_video_recv(
                             &app,
                             traces.as_ref(),
                             if screen {
-                                "tela chegou"
+                                "screen arrived"
                             } else {
-                                "vídeo chegou"
+                                "video arrived"
                             },
                             "ok",
                             Some(&peer),
@@ -941,11 +941,11 @@ async fn bind_pc(
                 }
             }
             let (event, level) = match st {
-                RTCPeerConnectionState::Connecting => ("conectando", "info"),
-                RTCPeerConnectionState::Connected => ("enlace ok", "ok"),
-                RTCPeerConnectionState::Disconnected => ("enlace caiu", "warn"),
-                RTCPeerConnectionState::Failed => ("enlace falhou", "err"),
-                RTCPeerConnectionState::Closed => ("enlace fechou", "err"),
+                RTCPeerConnectionState::Connecting => ("connecting", "info"),
+                RTCPeerConnectionState::Connected => ("link ok", "ok"),
+                RTCPeerConnectionState::Disconnected => ("link disconnected", "warn"),
+                RTCPeerConnectionState::Failed => ("link failed", "err"),
+                RTCPeerConnectionState::Closed => ("link closed", "err"),
                 _ => return,
             };
             trace(&app, traces.as_ref(), event, level, Some(&peer));
@@ -962,14 +962,14 @@ async fn bind_pc(
         let peer = peer_ice_st.clone();
         Box::pin(async move {
             let (event, level) = match st {
-                RTCIceConnectionState::Checking => ("ICE negociando", "info"),
+                RTCIceConnectionState::Checking => ("ICE negotiating", "info"),
                 RTCIceConnectionState::Connected | RTCIceConnectionState::Completed => {
                     state(&app).hear_peer(&peer);
                     ("ICE ok", "ok")
                 }
-                RTCIceConnectionState::Disconnected => ("ICE caiu", "warn"),
-                RTCIceConnectionState::Failed => ("ICE falhou", "err"),
-                RTCIceConnectionState::Closed => ("ICE fechou", "err"),
+                RTCIceConnectionState::Disconnected => ("ICE disconnected", "warn"),
+                RTCIceConnectionState::Failed => ("ICE failed", "err"),
+                RTCIceConnectionState::Closed => ("ICE closed", "err"),
                 _ => return,
             };
             trace(&app, traces.as_ref(), event, level, Some(&peer));
@@ -1040,7 +1040,7 @@ async fn bind_pc(
                                 trace(
                                     &app,
                                     traces.as_ref(),
-                                    &format!("vídeo RTP {label} mid={}", mid.as_deref().unwrap_or("?")),
+                                    &format!("video RTP {label} mid={}", mid.as_deref().unwrap_or("?")),
                                     if h264 { "info" } else { "err" },
                                     Some(&peer),
                                 );
@@ -1073,7 +1073,7 @@ async fn bind_pc(
                                 trace(
                                     &app,
                                     traces.as_ref(),
-                                    &format!("vídeo RTP: {e}"),
+                                    &format!("video RTP: {e}"),
                                     "warn",
                                     Some(&peer),
                                 );
@@ -1107,7 +1107,7 @@ async fn bind_pc(
                     trace(
                         &app,
                         traces.as_ref(),
-                        "áudio chegou",
+                        "audio arrived",
                         "ok",
                         Some(&peer),
                     );
@@ -1204,7 +1204,7 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<(Arc<RTCPeerConnect
     }
     let (app, me, room, play, tracks, cam_tracks, screen_tracks, extras, as_hub) = {
         let guard = hub.inner.lock().await;
-        let session = guard.as_ref().ok_or("call nativa parada")?;
+        let session = guard.as_ref().ok_or("native call not running")?;
         let extras = session
             .hub
             .as_ref()
@@ -1301,7 +1301,7 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<(Arc<RTCPeerConnect
         let Some(session) = guard.as_mut() else {
             drop(guard);
             let _ = pc.close().await;
-            return Err("call nativa parada".into());
+            return Err("native call not running".into());
         };
         if let Some(existing) = session.peers.get(peer) {
             let existing_pc = existing.pc.clone();
@@ -1346,7 +1346,7 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<(Arc<RTCPeerConnect
         Arc::new(AtomicBool::new(false)),
     )
     .await;
-    trace(&app, hub.as_ref(), "enlace aberto", "info", Some(peer));
+    trace(&app, hub.as_ref(), "link open", "info", Some(peer));
     Ok((pc, true))
 }
 
@@ -1434,7 +1434,7 @@ async fn relight_ice(hub: Arc<RtcHub>, peer: String) {
         p.ice_retry.store(now, Ordering::Relaxed);
         session.app.clone()
     };
-    trace(&app, hub.as_ref(), "religando ICE", "warn", Some(&peer));
+    trace(&app, hub.as_ref(), "restarting ICE", "warn", Some(&peer));
     let _ = offer_now_opts(hub, &peer, true).await;
 }
 
@@ -1443,11 +1443,11 @@ async fn offer_now_opts(hub: Arc<RtcHub>, peer: &str, ice_restart: bool) -> Resu
     let _busy = gate.lock().await;
     let (app, me, room, pc) = {
         let guard = hub.inner.lock().await;
-        let session = guard.as_ref().ok_or("call nativa parada")?;
+        let session = guard.as_ref().ok_or("native call not running")?;
         if polite(&session.me, peer) {
             return Ok(());
         }
-        let p = session.peers.get(peer).ok_or("peer ausente")?;
+        let p = session.peers.get(peer).ok_or("peer missing")?;
         if p.pc.signaling_state() != RTCSignalingState::Stable {
             return Ok(());
         }
@@ -1473,7 +1473,7 @@ async fn offer_now_opts(hub: Arc<RtcHub>, peer: &str, ice_restart: bool) -> Resu
         }
         pc.set_local_description(offer).await.map_err(err)?;
         send_local(&app, &me, &room, peer, "offer", pc.as_ref()).await;
-        trace(&app, hub.as_ref(), "oferta enviada", "info", Some(peer));
+        trace(&app, hub.as_ref(), "offer sent", "info", Some(peer));
         Ok(())
     }
     .await;
@@ -1527,7 +1527,7 @@ async fn drop_peer(hub: &RtcHub, peer: &str, silent: bool) {
         );
     }
     let _ = pc.close().await;
-    trace(&app, hub, "enlace fechado", "warn", Some(peer));
+    trace(&app, hub, "link closed", "warn", Some(peer));
 }
 
 pub async fn start(app: &AppHandle, room: String, me: String) -> Result<(), String> {
@@ -1555,12 +1555,12 @@ pub async fn start(app: &AppHandle, room: String, me: String) -> Result<(), Stri
             tracks.clone(),
             play.clone(),
         ) {
-            trace(app, &hub, "mic nativo indisponível", "warn", None);
+            trace(app, &hub, "native mic unavailable", "warn", None);
         }
         spawn_video_send(
             app.clone(),
             hub.clone(),
-            "câmera",
+            "camera",
             false,
             running.clone(),
             cam_jpeg.clone(),
@@ -1569,7 +1569,7 @@ pub async fn start(app: &AppHandle, room: String, me: String) -> Result<(), Stri
         spawn_video_send(
             app.clone(),
             hub.clone(),
-            "tela",
+            "screen",
             true,
             running.clone(),
             screen_jpeg.clone(),
@@ -1612,7 +1612,7 @@ pub async fn start(app: &AppHandle, room: String, me: String) -> Result<(), Stri
             last_sess: HashMap::new(),
         });
     }
-    trace(app, &hub, "motor nativo (WebKit sem WebRTC)", "info", None);
+    trace(app, &hub, "native engine (WebKit without WebRTC)", "info", None);
     Ok(())
 }
 
@@ -1642,7 +1642,7 @@ pub async fn sync(app: &AppHandle, peers: Vec<String>, hub_pk: Option<String>) -
     let hub = state(app).rtc.clone();
     let (me, others, next_hub) = {
         let mut guard = hub.inner.lock().await;
-        let session = guard.as_mut().ok_or("call nativa parada")?;
+        let session = guard.as_mut().ok_or("native call not running")?;
         let others: Vec<String> = peers
             .into_iter()
             .filter(|p| !p.is_empty() && p != &session.me)
@@ -1692,7 +1692,7 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
     let hub = state(app).rtc.clone();
     let (me, room) = {
         let guard = hub.inner.lock().await;
-        let session = guard.as_ref().ok_or("call nativa parada")?;
+        let session = guard.as_ref().ok_or("native call not running")?;
         if frame.room != session.room || frame.from == session.me || frame.to != session.me {
             return Ok(());
         }
@@ -1718,7 +1718,7 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
             })
         };
         if stale {
-            trace(app, &hub, "bye atrasado", "info", Some(&frame.from));
+            trace(app, &hub, "stale bye", "info", Some(&frame.from));
             return Ok(());
         }
         drop_peer(&hub, &frame.from, true).await;
@@ -1762,8 +1762,8 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
         if let Some(sdp) = frame.sdp {
             let collision = {
                 let guard = hub.inner.lock().await;
-                let session = guard.as_ref().ok_or("call nativa parada")?;
-                let p = session.peers.get(&frame.from).ok_or("peer ausente")?;
+                let session = guard.as_ref().ok_or("native call not running")?;
+                let p = session.peers.get(&frame.from).ok_or("peer missing")?;
                 p.making_offer.load(Ordering::Relaxed)
                     || p.pc.signaling_state() != RTCSignalingState::Stable
             };
@@ -1780,7 +1780,7 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
                     flush_ice(p).await;
                 }
             }
-            trace(app, &hub, "oferta recebida", "info", Some(&frame.from));
+            trace(app, &hub, "offer received", "info", Some(&frame.from));
             let answer = pc.create_answer(None).await.map_err(err)?;
             pc.set_local_description(answer).await.map_err(err)?;
             send_local(app, &me, &room, &frame.from, "answer", pc.as_ref()).await;
@@ -1793,9 +1793,9 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
                 app,
                 &hub,
                 if video_ok {
-                    "resposta enviada"
+                    "answer sent"
                 } else {
-                    "resposta sem H264"
+                    "answer without H264"
                 },
                 if video_ok { "info" } else { "err" },
                 Some(&frame.from),
@@ -1823,7 +1823,7 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
             trace(
                 app,
                 &hub,
-                &format!("resposta recebida h264={has_h264} vp8={has_vp8}"),
+                &format!("answer received h264={has_h264} vp8={has_vp8}"),
                 if has_h264 { "ok" } else { "err" },
                 Some(&frame.from),
             );
@@ -1862,19 +1862,19 @@ pub async fn share_screen(app: &AppHandle, on: bool) -> Result<(), String> {
     if on {
         let app2 = {
             let guard = hub.inner.lock().await;
-            let session = guard.as_ref().ok_or("call nativa parada")?;
+            let session = guard.as_ref().ok_or("native call not running")?;
             session.app.clone()
         };
         if grab_screen_on_main(&app2).is_none() {
-            return Err("captura de tela indisponível neste compositor".into());
+            return Err("Screen capture unavailable on this compositor".into());
         }
         let guard = hub.inner.lock().await;
-        let session = guard.as_ref().ok_or("call nativa parada")?;
+        let session = guard.as_ref().ok_or("native call not running")?;
         session.screen_share.store(true, Ordering::Relaxed);
-        trace(app, &hub, "tela nativa on", "info", None);
+        trace(app, &hub, "native screen on", "info", None);
     } else {
         let guard = hub.inner.lock().await;
-        let session = guard.as_ref().ok_or("call nativa parada")?;
+        let session = guard.as_ref().ok_or("native call not running")?;
         session.screen_share.store(false, Ordering::Relaxed);
         if let Ok(mut g) = session.screen_jpeg.lock() {
             *g = None;
@@ -1887,7 +1887,7 @@ pub async fn share_screen(app: &AppHandle, on: bool) -> Result<(), String> {
                 jpeg: String::new(),
             },
         );
-        trace(app, &hub, "tela nativa off", "info", None);
+        trace(app, &hub, "native screen off", "info", None);
     }
     Ok(())
 }

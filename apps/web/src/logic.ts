@@ -145,8 +145,8 @@ export function createRtcPeerConnection(
   Ctor: (new (config?: RTCConfiguration) => RTCPeerConnection) | undefined,
   configs: RTCConfiguration[],
 ): { ok: true; pc: RTCPeerConnection } | { ok: false; error: string } {
-  if (!Ctor) return { ok: false, error: "RTCPeerConnection ausente no webview" };
-  let last = "falhou ao abrir o enlace";
+  if (!Ctor) return { ok: false, error: "RTCPeerConnection missing from webview" };
+  let last = "failed to open link";
   for (const config of configs) {
     try {
       return { ok: true, pc: new Ctor(config) };
@@ -216,7 +216,7 @@ export function audioDeviceLabel(
 ): string {
   const name = device.label.trim();
   if (name) return name;
-  return kind === "input" ? `Microfone ${index + 1}` : `Alto-falante ${index + 1}`;
+  return kind === "input" ? `Microphone ${index + 1}` : `Speaker ${index + 1}`;
 }
 
 export function resolveAudioDeviceId(devices: AudioDeviceHint[], preferred: string): string {
@@ -309,8 +309,8 @@ export type Presence = "online" | "away" | "busy" | "offline";
 
 export const PRESENCE_GROUPS: Array<{ id: Presence; label: string }> = [
   { id: "online", label: "Online" },
-  { id: "away", label: "Ausente" },
-  { id: "busy", label: "Ocupado" },
+  { id: "away", label: "Away" },
+  { id: "busy", label: "Busy" },
   { id: "offline", label: "Offline" },
 ];
 
@@ -341,12 +341,12 @@ export function effectivePresence(
 }
 
 export function presenceLabel(status: Presence, inVoice = false): string {
-  if (inVoice && (status === "online" || status === "away")) return "Em voz";
+  if (inVoice && (status === "online" || status === "away")) return "In voice";
   switch (status) {
     case "away":
-      return "Ausente";
+      return "Away";
     case "busy":
-      return "Ocupado";
+      return "Busy";
     case "offline":
       return "Offline";
     default:
@@ -410,11 +410,11 @@ export function callPathMode(others: number, hasHub = false): CallPathMode {
 export function callPathHint(mode: CallPathMode): string {
   switch (mode) {
     case "1:1":
-      return "dois clientes, WebRTC direto";
+      return "two clients, direct WebRTC";
     case "HUB:N":
-      return "grupo via hub eleito";
+      return "group via elected hub";
     default:
-      return "grupo em mesh · HUB:N ainda não elege";
+      return "group mesh · HUB:N not elected yet";
   }
 }
 
@@ -512,13 +512,13 @@ export function iceTraceText(state: string): string | null {
     case "completed":
       return "ICE ok";
     case "disconnected":
-      return "ICE caiu";
+      return "ICE disconnected";
     case "failed":
-      return "ICE falhou";
+      return "ICE failed";
     case "checking":
-      return "ICE negociando";
+      return "ICE negotiating";
     case "closed":
-      return "ICE fechou";
+      return "ICE closed";
     default:
       return null;
   }
@@ -544,15 +544,15 @@ export function iceTraceLevel(state: string): "info" | "ok" | "warn" | "err" | n
 export function pcTraceText(state: string): string | null {
   switch (state) {
     case "connecting":
-      return "conectando";
+      return "connecting";
     case "connected":
-      return "enlace ok";
+      return "link ok";
     case "disconnected":
-      return "enlace caiu";
+      return "link disconnected";
     case "failed":
-      return "enlace falhou";
+      return "link failed";
     case "closed":
-      return "enlace fechou";
+      return "link closed";
     default:
       return null;
   }
@@ -637,10 +637,10 @@ export function looksLikeInvite(raw: string): boolean {
 }
 
 export function inviteShareText(communityName: string, code: string): string {
-  const name = communityName.trim() || "comunidade";
+  const name = communityName.trim() || "community";
   return [
-    `Convite Chaincord — ${name}`,
-    "Abra o app → Entrar com convite e cole isto:",
+    `Chaincord invite — ${name}`,
+    "Open the app → Join with invite and paste this:",
     code.trim(),
   ].join("\n");
 }

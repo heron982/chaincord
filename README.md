@@ -1,27 +1,27 @@
 # Chaincord
 
-Live chat descentralizado (alpha). Comunidades, canais, E2EE no desenho — o binário ainda é MVP.
+Decentralized live chat (**alpha**). Communities, channels, E2EE in the design — the binary is still an MVP.
 
-Caderno: [`docs/arquitetura.md`](docs/arquitetura.md). Licença: [Apache-2.0](LICENSE).
+Architecture notebook: [`docs/architecture.md`](docs/architecture.md). License: [Apache-2.0](LICENSE).
 
 This is an **alpha** desktop chat. The live channel key still travels in the invite; do not treat it as production E2EE. See [`SECURITY.md`](SECURITY.md).
 
-## O que funciona hoje
+## What works today
 
-- Criar comunidade ou entrar com convite
-- Chat em `#general` na LAN; entre redes se o PC de quem criou for alcançável (o app dele é o relé)
-- Call 1:1 (WebRTC). Em CGNAT pode falhar até haver TURN próprio
-- Dois clientes no mesmo PC: abra o app duas vezes (a segunda pega outra porta)
+- Create a community or join with an invite
+- Chat in `#general` on the LAN; across networks if the creator’s PC is reachable (their app is the MQTT relay)
+- Voice/video call: **1:1** is direct WebRTC; **3+** uses an elected **HUB:N** peer (not a full SFU product yet). CGNAT may fail until you run your own TURN
+- Two clients on one PC: open the app twice (the second instance picks another port)
 
-## O que ainda não é
+## What it is not yet
 
-MLS, erasure, SFU de grupo, coturn da comunidade, nó `--node` 24h. A chave ao vivo ainda vai no convite.
+MLS, erasure-coded history, a real SFU (`str0m`), community coturn, or a 24h `--node` daemon. The live key still goes in the invite.
 
-Não há broker MQTT do Chaincord. Quem cria hospeda o hub no app; o convite leva o endereço. Sem essa máquina alcançável, só a mesma rede. TURN OpenRelay ainda é fallback da call 1:1. Detalhe em [`SECURITY.md`](SECURITY.md).
+There is no Chaincord-operated MQTT broker. The creator hosts the hub in the app; the invite carries the address. Without that machine reachable, only same-network chat works. Public OpenRelay TURN is still a 1:1 call fallback. Details in [`SECURITY.md`](SECURITY.md).
 
-## Desenvolvimento
+## Development
 
-Precisa de Node.js, Rust e (no Windows) WebView2 + Build Tools.
+Needs Node.js, Rust, and (on Windows) WebView2 + Build Tools.
 
 ```bash
 npm install
@@ -30,18 +30,18 @@ npm run test:core
 npm run tauri:dev
 ```
 
-Instalador / exe:
+Installer / exe:
 
 ```bash
 npm run dist
 ```
 
-Saída padrão do Tauri: `src-tauri/target/release/bundle/` (NSIS + exe). Se existir um disco `D:\` com o layout local de build, os scripts em `scripts/` usam esse disco; caso contrário usam o Cargo/Node do sistema.
+Default Tauri output: `src-tauri/target/release/bundle/` (NSIS + exe). If a `D:\` disk exists with the local build layout, scripts under `scripts/` use it; otherwise they use system Cargo/Node.
 
-## Uso rápido
+## Quick start
 
-1. Abre o app
-2. **Criar** comunidade ou **Entrar** com o convite
-3. Conversar em `#general`
+1. Open the app
+2. **Create** a community or **Join** with an invite
+3. Chat in `#general`
 
-Mesmo Wi-Fi: o convite já leva o IP da LAN. Redes diferentes: o app de quem criou é o relé — os dois saem até essa máquina.
+Same Wi-Fi: the invite already carries the LAN IP. Different networks: the creator’s app is the relay — both peers reach that machine.

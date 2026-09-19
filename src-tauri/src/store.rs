@@ -386,7 +386,7 @@ impl Store {
                 .ok()
                 .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "comunidade".into());
+                .unwrap_or_else(|| "community".into());
             out.push(CommunityInfo { id, name });
         }
         out

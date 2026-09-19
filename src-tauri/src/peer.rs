@@ -1211,7 +1211,7 @@ fn pick_port(start: u16) -> Result<u16, String> {
             return Ok(port);
         }
     }
-    Err("nenhuma porta livre".into())
+    Err("no free port".into())
 }
 
 fn allow_windows_listen(port: u16) {
@@ -1944,7 +1944,7 @@ fn slug_name(name: &str) -> String {
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     if cleaned.is_empty() {
-        "sala".into()
+        "room".into()
     } else {
         cleaned
     }
@@ -2211,7 +2211,7 @@ async fn dial_ws(
     match tokio::time::timeout(Duration::from_secs(8), connect_async(url)).await {
         Ok(Ok((ws, _))) => Ok(ws),
         Ok(Err(err)) => Err(err.to_string()),
-        Err(_) => Err("tempo esgotado".into()),
+        Err(_) => Err("timed out".into()),
     }
 }
 
@@ -2617,7 +2617,7 @@ fn handle_remote(
 
 pub fn send_signal(app: &AppHandle, frame: serde_json::Value) -> Result<(), String> {
     if frame.get("type").and_then(|v| v.as_str()) != Some("rtc") {
-        return Err("sinal invalido".into());
+        return Err("invalid signal".into());
     }
     let state = state_of(app);
     let json = frame.to_string();
@@ -2751,7 +2751,7 @@ pub fn switch_community(app: &AppHandle, community_id: &str) -> Result<(), Strin
         guard
             .as_ref()
             .and_then(|store| store.load_session(community_id))
-            .ok_or_else(|| "comunidade nao encontrada".to_string())?
+            .ok_or_else(|| "community not found".to_string())?
     };
     if in_call {
         persist_session(app);
@@ -2783,14 +2783,14 @@ pub fn send_chat(app: &AppHandle, text: &str, channel: &str) -> Result<(), Strin
     let live = community_id(app);
     if viewed.as_ref() != live.as_ref() {
         let Some(viewed_id) = viewed else {
-            return Err("Entre ou crie uma comunidade primeiro.".into());
+            return Err("Join or create a community first.".into());
         };
         let session = {
             let guard = state.store.lock().expect("store");
             guard
                 .as_ref()
                 .and_then(|store| store.load_session(&viewed_id))
-                .ok_or_else(|| "comunidade nao encontrada".to_string())?
+                .ok_or_else(|| "community not found".to_string())?
         };
         let channel = if session.text_channels.iter().any(|c| c == &channel) {
             channel
@@ -2827,7 +2827,7 @@ pub fn send_chat(app: &AppHandle, text: &str, channel: &str) -> Result<(), Strin
     let (wire, sender, ts, channel) = {
         let inner = state.inner.lock().expect("state");
         let Some(community) = inner.community.as_ref() else {
-            return Err("Entre ou crie uma comunidade primeiro.".into());
+            return Err("Join or create a community first.".into());
         };
         let channel = if inner.text_channels.iter().any(|c| c == &channel) {
             channel
@@ -2873,14 +2873,14 @@ pub fn add_room(app: &AppHandle, kind: &str, name: &str) -> Result<(), String> {
     };
     if viewed.as_ref() != live.as_ref() {
         let Some(viewed_id) = viewed else {
-            return Err("Entre ou crie uma comunidade primeiro.".into());
+            return Err("Join or create a community first.".into());
         };
         let mut session = {
             let guard = state.store.lock().expect("store");
             guard
                 .as_ref()
                 .and_then(|store| store.load_session(&viewed_id))
-                .ok_or_else(|| "comunidade nao encontrada".to_string())?
+                .ok_or_else(|| "community not found".to_string())?
         };
         if kind == "call" {
             if !session.call_rooms.iter().any(|c| c == &slug) {
@@ -2901,7 +2901,7 @@ pub fn add_room(app: &AppHandle, kind: &str, name: &str) -> Result<(), String> {
     {
         let mut inner = state.inner.lock().expect("state");
         if inner.community.is_none() {
-            return Err("Entre ou crie uma comunidade primeiro.".into());
+            return Err("Join or create a community first.".into());
         }
         if kind == "call" {
             if !inner.call_rooms.iter().any(|c| c == &slug) {
@@ -2934,7 +2934,7 @@ pub fn join_call(app: &AppHandle, room: &str) -> Result<(), String> {
     let live = community_id(app);
     if viewed.as_ref() != live.as_ref() {
         let Some(viewed_id) = viewed else {
-            return Err("Entre ou crie uma comunidade primeiro.".into());
+            return Err("Join or create a community first.".into());
         };
         let _ = clear_own_voice(app);
         persist_session(app);
@@ -2943,7 +2943,7 @@ pub fn join_call(app: &AppHandle, room: &str) -> Result<(), String> {
             guard
                 .as_ref()
                 .and_then(|store| store.load_session(&viewed_id))
-                .ok_or_else(|| "comunidade nao encontrada".to_string())?
+                .ok_or_else(|| "community not found".to_string())?
         };
         state.relay_gen.fetch_add(1, Ordering::SeqCst);
         activate_loaded(app, session, true);
@@ -2951,7 +2951,7 @@ pub fn join_call(app: &AppHandle, room: &str) -> Result<(), String> {
     let (pk, room_added) = {
         let mut inner = state.inner.lock().expect("state");
         if inner.community.is_none() {
-            return Err("Entre ou crie uma comunidade primeiro.".into());
+            return Err("Join or create a community first.".into());
         }
         let room_added = !inner.call_rooms.iter().any(|c| c == &room);
         if room_added {
@@ -3210,10 +3210,10 @@ fn load_json_profile(app: &AppHandle) {
 pub fn save_profile(app: &AppHandle, display_name: &str, avatar: &str) -> Result<(), String> {
     let name = display_name.trim();
     if !(2..=32).contains(&name.chars().count()) {
-        return Err("O nome precisa ter entre 2 e 32 caracteres.".into());
+        return Err("Name must be 2–32 characters.".into());
     }
     if avatar.len() > 400_000 {
-        return Err("Foto grande demais. Escolha outra imagem.".into());
+        return Err("Image is too large. Choose another.".into());
     }
     let path = profile_path(app)?;
     let secret = {
@@ -3277,7 +3277,7 @@ mod tests {
     fn slug_normalizes_room_names() {
         assert_eq!(slug_name("Lobby"), "lobby");
         assert_eq!(slug_name("  Sala Principal  "), "sala-principal");
-        assert_eq!(slug_name("***"), "sala");
+        assert_eq!(slug_name("***"), "room");
     }
 
     #[test]

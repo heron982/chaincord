@@ -21,7 +21,7 @@ impl Identity {
         let bytes = hex::decode(secret).map_err(|e| e.to_string())?;
         let arr: [u8; 32] = bytes
             .try_into()
-            .map_err(|_| "chave secreta invalida".to_string())?;
+            .map_err(|_| "invalid secret key".to_string())?;
         Ok(Self {
             signing: SigningKey::from_bytes(&arr),
         })
@@ -111,7 +111,7 @@ pub fn create_community(owner: &Identity, name: &str) -> Community {
         name: {
             let trimmed = name.trim();
             if trimmed.is_empty() {
-                "comunidade".into()
+                "community".into()
             } else {
                 trimmed.into()
             }
@@ -188,13 +188,13 @@ fn pack_url_list(out: &mut Vec<u8>, urls: &[String]) {
 fn pack_invite(invite: &Invite) -> Result<Vec<u8>, String> {
     let name = invite.community.genesis.name.as_bytes();
     if name.is_empty() || name.len() > 64 {
-        return Err("nome da comunidade invalido".into());
+        return Err("invalid community name".into());
     }
-    let owner = hex::decode(&invite.community.genesis.owner).map_err(|_| "convite invalido")?;
-    let signature = hex::decode(&invite.community.signature).map_err(|_| "convite invalido")?;
-    let live_key = hex::decode(&invite.community.live_key).map_err(|_| "convite invalido")?;
+    let owner = hex::decode(&invite.community.genesis.owner).map_err(|_| "invalid invite")?;
+    let signature = hex::decode(&invite.community.signature).map_err(|_| "invalid invite")?;
+    let live_key = hex::decode(&invite.community.live_key).map_err(|_| "invalid invite")?;
     if owner.len() != 32 || signature.len() != 64 || live_key.len() != 32 {
-        return Err("convite invalido".into());
+        return Err("invalid invite".into());
     }
     let version = if invite.relays.iter().any(|r| !r.is_empty()) {
         3
@@ -220,9 +220,9 @@ fn unpack_url_list(bytes: &[u8], i: &mut usize) -> Result<Vec<String>, String> {
     let take = |i: &mut usize, n: usize| -> Result<&[u8], String> {
         let end = i
             .checked_add(n)
-            .ok_or_else(|| "convite invalido".to_string())?;
+            .ok_or_else(|| "invalid invite".to_string())?;
         if end > bytes.len() {
-            return Err("convite invalido".into());
+            return Err("invalid invite".into());
         }
         let slice = &bytes[*i..end];
         *i = end;
@@ -230,12 +230,12 @@ fn unpack_url_list(bytes: &[u8], i: &mut usize) -> Result<Vec<String>, String> {
     };
     let count = take(i, 1)?[0] as usize;
     if count > 8 {
-        return Err("convite invalido".into());
+        return Err("invalid invite".into());
     }
     let mut urls = Vec::with_capacity(count);
     for _ in 0..count {
         let len = take(i, 1)?[0] as usize;
-        let url = String::from_utf8(take(i, len)?.to_vec()).map_err(|_| "convite invalido")?;
+        let url = String::from_utf8(take(i, len)?.to_vec()).map_err(|_| "invalid invite")?;
         if !url.is_empty() {
             urls.push(url);
         }
@@ -246,9 +246,9 @@ fn unpack_url_list(bytes: &[u8], i: &mut usize) -> Result<Vec<String>, String> {
 fn unpack_invite(bytes: &[u8]) -> Result<Invite, String> {
     let mut i = 0usize;
     let take = |i: &mut usize, n: usize| -> Result<&[u8], String> {
-        let end = i.checked_add(n).ok_or_else(|| "convite invalido".to_string())?;
+        let end = i.checked_add(n).ok_or_else(|| "invalid invite".to_string())?;
         if end > bytes.len() {
-            return Err("convite invalido".into());
+            return Err("invalid invite".into());
         }
         let slice = &bytes[*i..end];
         *i = end;
@@ -256,13 +256,13 @@ fn unpack_invite(bytes: &[u8]) -> Result<Invite, String> {
     };
     let version = take(&mut i, 1)?[0];
     if version != 2 && version != 3 {
-        return Err("convite invalido".into());
+        return Err("invalid invite".into());
     }
     let name_len = take(&mut i, 1)?[0] as usize;
     if name_len == 0 || name_len > 64 {
-        return Err("convite invalido".into());
+        return Err("invalid invite".into());
     }
-    let name = String::from_utf8(take(&mut i, name_len)?.to_vec()).map_err(|_| "convite invalido")?;
+    let name = String::from_utf8(take(&mut i, name_len)?.to_vec()).map_err(|_| "invalid invite")?;
     let owner = hex::encode(take(&mut i, 32)?);
     let created_raw = take(&mut i, 8)?;
     let mut created_buf = [0u8; 8];
@@ -277,7 +277,7 @@ fn unpack_invite(bytes: &[u8]) -> Result<Invite, String> {
         Vec::new()
     };
     if i != bytes.len() {
-        return Err("convite invalido".into());
+        return Err("invalid invite".into());
     }
     let genesis = Genesis {
         name,
@@ -297,17 +297,17 @@ fn unpack_invite(bytes: &[u8]) -> Result<Invite, String> {
         relays,
     };
     if !verify_community(&invite.community) {
-        return Err("convite invalido".into());
+        return Err("invalid invite".into());
     }
     Ok(invite)
 }
 
 fn decode_invite_json(bytes: &[u8]) -> Result<Invite, String> {
-    let json = String::from_utf8(bytes.to_vec()).map_err(|_| "convite invalido".to_string())?;
+    let json = String::from_utf8(bytes.to_vec()).map_err(|_| "invalid invite".to_string())?;
     let invite: Invite =
-        serde_json::from_str(&json).map_err(|_| "convite invalido".to_string())?;
+        serde_json::from_str(&json).map_err(|_| "invalid invite".to_string())?;
     if (invite.v != 1 && invite.v != 2 && invite.v != 3) || !verify_community(&invite.community) {
-        return Err("convite invalido".into());
+        return Err("invalid invite".into());
     }
     Ok(invite)
 }
@@ -328,7 +328,7 @@ pub fn decode_invite(raw: &str) -> Result<Invite, String> {
         .decode(body)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(body))
         .or_else(|_| base64::engine::general_purpose::STANDARD.decode(body))
-        .map_err(|_| "convite invalido".to_string())?;
+        .map_err(|_| "invalid invite".to_string())?;
     if matches!(bytes.first(), Some(2) | Some(3)) {
         return unpack_invite(&bytes);
     }
@@ -408,10 +408,10 @@ fn verify_ed25519(public_hex: &str, message: &[u8], signature_hex: &str) -> bool
 }
 
 fn hex_to_32(hex_str: &str) -> Result<[u8; 32], String> {
-    let bytes = hex::decode(hex_str).map_err(|_| "chave invalida".to_string())?;
+    let bytes = hex::decode(hex_str).map_err(|_| "invalid key".to_string())?;
     bytes
         .try_into()
-        .map_err(|_| "chave invalida".to_string())
+        .map_err(|_| "invalid key".to_string())
 }
 
 fn random_bytes(n: usize) -> Vec<u8> {
@@ -480,7 +480,7 @@ mod tests {
         assert_eq!(decoded_prefix.community.id, community.id);
 
         let wrapped_msg = format!(
-            "Convite Chaincord — {}\nAbra o app → Entrar com convite e cole isto:\n{}",
+            "Chaincord invite — {}\nOpen the app → Join with invite and paste this:\n{}",
             community.genesis.name, encoded
         );
         let from_msg = decode_invite(&wrapped_msg).expect("share message invite");

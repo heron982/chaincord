@@ -224,7 +224,7 @@ describe("audio devices", () => {
 
   it("names unlabeled devices and remembers the choice", () => {
     expect(audioDeviceLabel({ deviceId: "x", kind: "audioinput", label: "  " }, 0, "input")).toBe(
-      "Microfone 1",
+      "Microphone 1",
     );
     expect(audioDeviceLabel({ deviceId: "y", kind: "audiooutput", label: "Fones" }, 0, "output")).toBe(
       "Fones",
@@ -359,7 +359,7 @@ describe("call tiles", () => {
     expect(made.ok).toBe(true);
     expect(tries.length).toBeGreaterThan(1);
     const missing = createRtcPeerConnection(undefined, [{}]);
-    expect(missing).toEqual({ ok: false, error: "RTCPeerConnection ausente no webview" });
+    expect(missing).toEqual({ ok: false, error: "RTCPeerConnection missing from webview" });
   });
 });
 
@@ -370,7 +370,7 @@ describe("presence", () => {
     expect(effectivePresence("away", false)).toBe("away");
   });
 
-  it("groups members and labels in Portuguese", () => {
+  it("groups members and labels presence", () => {
     const groups = groupByPresence([
       { status: "online" as const },
       { status: "offline" as const },
@@ -379,9 +379,9 @@ describe("presence", () => {
     ]);
     expect(groups.online).toHaveLength(1);
     expect(groups.offline).toHaveLength(1);
-    expect(presenceLabel("away")).toBe("Ausente");
-    expect(presenceLabel("busy")).toBe("Ocupado");
-    expect(presenceLabel("online", true)).toBe("Em voz");
+    expect(presenceLabel("away")).toBe("Away");
+    expect(presenceLabel("busy")).toBe("Busy");
+    expect(presenceLabel("online", true)).toBe("In voice");
   });
 });
 
@@ -430,8 +430,8 @@ describe("call negotiation", () => {
     expect(callPathMode(2)).toBe("mesh");
     expect(callPathMode(2, true)).toBe("HUB:N");
     expect(callPathHint("mesh")).toContain("HUB:N");
-    expect(callPathHint("HUB:N")).toContain("hub eleito");
-    expect(iceTraceText("disconnected")).toBe("ICE caiu");
+    expect(callPathHint("HUB:N")).toContain("elected hub");
+    expect(iceTraceText("disconnected")).toBe("ICE disconnected");
     expect(iceTraceLevel("failed")).toBe("err");
   });
 
@@ -567,6 +567,6 @@ describe("call negotiation", () => {
     const text = inviteShareText("  Equipe  ", "cc/abc");
     expect(text).toContain("Equipe");
     expect(text).toContain("cc/abc");
-    expect(text).toContain("Entrar com convite");
+    expect(text).toContain("Join with invite");
   });
 });

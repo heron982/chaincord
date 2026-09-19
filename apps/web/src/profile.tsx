@@ -76,7 +76,7 @@ export function ProfileEditor({
     e.preventDefault();
     const next = name.trim();
     if (next.length < 2 || next.length > 32) {
-      setErr("O nome precisa ter entre 2 e 32 caracteres.");
+      setErr("Name must be 2–32 characters.");
       return;
     }
     setBusy(true);
@@ -97,7 +97,7 @@ export function ProfileEditor({
         type="button"
         className="avatar-pick"
         onClick={() => fileRef.current?.click()}
-        title="Escolher foto"
+        title="Choose photo"
       >
         {avatar ? <img src={avatar} alt="" /> : <span>{(name.trim().slice(0, 1) || "+").toUpperCase()}</span>}
       </button>
@@ -114,13 +114,13 @@ export function ProfileEditor({
               setAvatar(data);
               setErr(null);
             })
-            .catch(() => setErr("Não deu para ler essa imagem."));
+            .catch(() => setErr("Couldn't read that image."));
         }}
       />
       <input
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder="Nome de usuário"
+        placeholder="Display name"
         maxLength={32}
         autoFocus
       />
@@ -131,7 +131,7 @@ export function ProfileEditor({
         </button>
         {onCancel && (
           <button type="button" className="ghost" onClick={onCancel}>
-            Cancelar
+            Cancel
           </button>
         )}
       </div>
@@ -163,10 +163,10 @@ export function UserPanel({
   onSettings: (tab?: "profile" | "audio") => void;
 }) {
   const [open, setOpen] = useState(false);
-  const label = inVoice && presence !== "busy" ? "Em voz" : presenceLabel(presence);
+  const label = inVoice && presence !== "busy" ? "In voice" : presenceLabel(presence);
   return (
     <div className="user-panel">
-      <button type="button" className="user-chip" onClick={() => onSettings()} title="Meu perfil">
+      <button type="button" className="user-chip" onClick={() => onSettings()} title="My profile">
         <span className="user-avatar">
           {avatar ? <img src={avatar} alt="" /> : <span>{name.slice(0, 1).toUpperCase()}</span>}
           <i className={`presence-dot ${presence}`} />
@@ -180,7 +180,7 @@ export function UserPanel({
         <button
           type="button"
           className="ghost user-status-open"
-          title="Alterar status"
+          title="Change status"
           onClick={(e) => {
             e.stopPropagation();
             setOpen((v) => !v);
@@ -193,8 +193,8 @@ export function UserPanel({
             {(
               [
                 ["online", "Online"],
-                ["away", "Ausente"],
-                ["busy", "Ocupado"],
+                ["away", "Away"],
+                ["busy", "Busy"],
               ] as const
             ).map(([id, text]) => (
               <button
@@ -217,7 +217,7 @@ export function UserPanel({
         <button
           type="button"
           className={micMuted ? "off" : ""}
-          title={micMuted ? "Ativar microfone · clique direito para aparelhos" : "Silenciar microfone · clique direito para aparelhos"}
+          title={micMuted ? "Unmute mic · right-click for devices" : "Mute mic · right-click for devices"}
           onClick={onMic}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -229,7 +229,7 @@ export function UserPanel({
         <button
           type="button"
           className={deafened ? "off" : ""}
-          title={deafened ? "Ativar som · clique direito para aparelhos" : "Silenciar som · clique direito para aparelhos"}
+          title={deafened ? "Undeafen · right-click for devices" : "Deafen · right-click for devices"}
           onClick={onDeafen}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -238,7 +238,7 @@ export function UserPanel({
         >
           <IconHead muted={deafened} />
         </button>
-        <button type="button" title="Configurações do usuário" onClick={() => onSettings()}>
+        <button type="button" title="User settings" onClick={() => onSettings()}>
           <IconGear />
         </button>
       </div>

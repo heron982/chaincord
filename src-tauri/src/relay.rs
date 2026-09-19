@@ -93,17 +93,17 @@ pub fn effective(stored: &[String]) -> Vec<String> {
 pub fn parse_one(raw: &str) -> Result<String, String> {
     let url = raw.trim();
     if url.is_empty() {
-        return Err("informe um relé ws:// ou wss://".into());
+        return Err("Enter a ws:// or wss:// relay URL".into());
     }
     if url.len() > 255 {
-        return Err("relé muito longo".into());
+        return Err("relay URL too long".into());
     }
     if url.chars().any(char::is_whitespace) {
-        return Err("relé invalido".into());
+        return Err("invalid relay".into());
     }
     let lower = url.to_ascii_lowercase();
     if !(lower.starts_with("wss://") || lower.starts_with("ws://")) {
-        return Err("relé deve ser ws:// ou wss://".into());
+        return Err("relay must be ws:// or wss://".into());
     }
     let rest = if lower.starts_with("wss://") {
         &url[6..]
@@ -111,7 +111,7 @@ pub fn parse_one(raw: &str) -> Result<String, String> {
         &url[5..]
     };
     if rest.is_empty() || rest.starts_with('/') {
-        return Err("relé invalido".into());
+        return Err("invalid relay".into());
     }
     Ok(url.to_string())
 }
@@ -305,19 +305,19 @@ async fn connect_mqtt(
     );
     let (mut ws, _) = tokio::time::timeout(Duration::from_secs(8), tokio_tungstenite::connect_async(req))
         .await
-        .map_err(|_| "tempo esgotado".to_string())?
+        .map_err(|_| "timed out".to_string())?
         .map_err(|e| e.to_string())?;
     ws.send(Message::Binary(mqtt_connect(client_id).into()))
         .await
         .map_err(|e| e.to_string())?;
     let connack = tokio::time::timeout(Duration::from_secs(8), ws.next())
         .await
-        .map_err(|_| "sem CONNACK".to_string())?
-        .ok_or_else(|| "relé fechou".to_string())?
+        .map_err(|_| "no CONNACK".to_string())?
+        .ok_or_else(|| "relay closed".to_string())?
         .map_err(|e| e.to_string())?;
     let data = ws_bytes(connack)?;
     if data.first() != Some(&0x20) || data.get(3).copied().unwrap_or(1) != 0 {
-        return Err("CONNACK recusado".into());
+        return Err("CONNACK rejected".into());
     }
     Ok(ws)
 }
@@ -431,7 +431,7 @@ async fn pump(
         }
     }
     peer::unregister_relay(app, gen, slot);
-    Err("relé desconectou".into())
+    Err("relay disconnected".into())
 }
 
 type MqttWs = tokio_tungstenite::WebSocketStream<
@@ -455,7 +455,7 @@ async fn wait_suback(ws: &mut MqttWs) -> Result<Vec<u8>, String> {
                 let _ = ws.send(Message::Pong(p)).await;
             }
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                return Err("relé fechou".into());
+                return Err("relay closed".into());
             }
             Ok(Some(Err(e))) => return Err(e.to_string()),
             Ok(Some(_)) => {}
@@ -510,7 +510,7 @@ fn ws_bytes(msg: Message) -> Result<Vec<u8>, String> {
     match msg {
         Message::Binary(b) => Ok(b.to_vec()),
         Message::Text(t) => Ok(t.as_bytes().to_vec()),
-        _ => Err("frame ignorado".into()),
+        _ => Err("frame ignored".into()),
     }
 }
 

@@ -1,27 +1,27 @@
-# Segurança
+# Security
 
-O Chaincord está em **alpha**. Não use para dado que não poderia ir num grupo cujo convite vazou.
+Chaincord is **alpha**. Do not use it for data you would not put in a group whose invite leaked.
 
-## O que vale hoje
+## What holds today
 
-- A chave ao vivo do canal vai **no convite**. Quem tem o convite lê o chat.
-- Não há broker MQTT do Chaincord. Quem **cria** a comunidade hospeda o hub no próprio app; o convite leva o `ws://`. Quem entra não configura nada. Sem o criador alcançável (NAT sem porta / sem VPS), o chat entre redes não sobe. LAN e P2P direto continuam. O tópico inclui o `community_id`; o hub vê metadados, não o texto (se a chave do convite estiver certa).
-- `CHAINCORD_RELAY=off` desliga o cliente MQTT neste processo. `CHAINCORD_RELAY=wss://…` na criação troca o hub local por um broker externo.
-- TURN `openrelay.metered.ca` e STUN públicos existem só para a call 1:1 atravessar NAT. Não são infra de produção.
-- O desenho alvo (MLS, erasure, nó cego, SFU da comunidade) está em [`docs/arquitetura.md`](docs/arquitetura.md) e **ainda não está no binário**.
+- The live channel key travels **in the invite**. Anyone with the invite can read the chat.
+- There is no Chaincord MQTT broker. Whoever **creates** the community hosts the hub in their app; the invite carries the `ws://` address. Joiners do not configure anything. If the creator is unreachable (NAT without a port / no VPS), cross-network chat does not come up. LAN and direct P2P still work. The topic includes `community_id`; the hub sees metadata, not plaintext (when the invite key is correct).
+- `CHAINCORD_RELAY=off` disables the MQTT client in this process. `CHAINCORD_RELAY=wss://…` at create time replaces the local hub with an external broker.
+- TURN `openrelay.metered.ca` and public STUN exist only so 1:1 calls can traverse NAT. They are not production infrastructure.
+- The target design (MLS, erasure, blind node, community SFU) lives in [`docs/architecture.md`](docs/architecture.md) and is **not in the binary** yet. Group calls today use an elected **HUB:N** WebRTC peer, not a full SFU.
 
-## Relé próprio
+## Own relay
 
-Não há campo na UI. O desktop que cria a comunidade já é o hub. Para internet, essa máquina precisa aceitar TCP na porta do app (LAN, VPS, ou porta aberta).
+There is no relay field in the UI. The desktop that creates the community is already the hub. For internet use, that machine must accept TCP on the app port (LAN, VPS, or opened port).
 
-## Relatar falha
+## Reporting a vulnerability
 
-Não abra issue pública com exploit, dump de chave ou PoC.
+Do not open a public issue with an exploit, key dump, or PoC.
 
-Preferência: [GitHub Security Advisories](https://github.com/heron982/chaincord/security/advisories/new) (Private vulnerability reporting).
+Preferred: [GitHub Security Advisories](https://github.com/heron982/chaincord/security/advisories/new) (private vulnerability reporting).
 
-Ou e-mail: `felipedevlp@gmail.com`, com:
+Or email: `felipedevlp@gmail.com`, with:
 
-- versão (`package.json` / `src-tauri/tauri.conf.json`)
-- o que acontece e o que deveria acontecer
-- se a falha deixa um terceiro ler mensagem, fingir identidade ou derrubar a rede
+- version (`package.json` / `src-tauri/tauri.conf.json`)
+- what happens vs what should happen
+- whether a third party can read messages, impersonate identity, or take down the network

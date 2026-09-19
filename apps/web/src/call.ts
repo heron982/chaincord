@@ -170,7 +170,7 @@ export class CallNet {
     private readonly onLink: (link: CallLink) => void,
     private readonly onLog: (line: CallTrace) => void,
   ) {
-    this.trace("call iniciada", "info");
+    this.trace("call started", "info");
     if (this.native) {
       this.nativeReady = this.bootNative();
       return;
@@ -195,7 +195,7 @@ export class CallNet {
       }
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
-      this.trace(`neste app: ${why}`, "err");
+      this.trace(`native app: ${why}`, "err");
     }
   }
 
@@ -218,7 +218,7 @@ export class CallNet {
     if (mode === this.pathMode) return;
     const prev = this.pathMode;
     this.pathMode = mode;
-    this.trace(`modo ${prev} → ${mode}`, "info");
+    this.trace(`mode ${prev} → ${mode}`, "info");
   }
 
   private trace(event: string, level: CallTrace["level"], peer: string | null = null) {
@@ -256,7 +256,7 @@ export class CallNet {
     this.screen = stream;
     if (this.native) {
       void backendRtcShareScreen(Boolean(stream)).catch((err: unknown) => {
-        this.trace(`tela: ${String(err)}`, "err");
+        this.trace(`screen: ${String(err)}`, "err");
       });
       this.kickNativePump();
       return;
@@ -267,7 +267,7 @@ export class CallNet {
 
   async setScreenNative(on: boolean) {
     await backendRtcShareScreen(on);
-    this.trace(on ? "tela nativa on" : "tela nativa off", on ? "ok" : "info");
+    this.trace(on ? "native screen on" : "native screen off", on ? "ok" : "info");
   }
 
   private ingestNativeFrame(peer: string, screen: boolean, jpeg: string) {
@@ -425,7 +425,7 @@ export class CallNet {
       void this.nativeReady
         .then(() => backendRtcSync(others, nextHub))
         .catch((err) => {
-          this.trace(`neste app: ${String(err)}`, "err");
+          this.trace(`native app: ${String(err)}`, "err");
         });
       this.hub = nextHub;
       this.noteMode();
@@ -433,7 +433,7 @@ export class CallNet {
     }
     if (this.hub !== nextHub) {
       this.hub = nextHub;
-      this.trace(nextHub ? `hub ${nextHub.slice(0, 8)}` : "sem hub", "info", nextHub);
+      this.trace(nextHub ? `hub ${nextHub.slice(0, 8)}` : "no hub", "info", nextHub);
     }
     const want = new Set(callWantedPeers(this.me, this.roster, this.hub));
     this.wantPeers = want;
@@ -451,11 +451,11 @@ export class CallNet {
           const why = err instanceof Error ? err.message : String(err);
           if (this.rtcFailed !== why) {
             this.rtcFailed = why;
-            this.trace(`neste app: ${why}`, "err");
+            this.trace(`native app: ${why}`, "err");
           }
           continue;
         }
-        this.trace("enlace aberto", "info", id);
+        this.trace("link open", "info", id);
         if (!polite) this.scheduleOffer(id);
       }
     }
@@ -475,7 +475,7 @@ export class CallNet {
       this.ensureMLines(pc, id);
       const after = pc.getTransceivers().filter((t) => t.direction !== "stopped").length;
       if (after > before) {
-        this.trace("layout hub cresceu · renegociando", "info", id);
+        this.trace("hub layout grew · renegotiating", "info", id);
         void this.enqueue(id, () => this.offerNow(id));
       }
     }
@@ -498,7 +498,7 @@ export class CallNet {
     if (this.native) {
       await this.nativeReady;
       await backendRtcSignal(frame).catch((err) => {
-        this.trace(`neste app: ${String(err)}`, "err");
+        this.trace(`native app: ${String(err)}`, "err");
       });
       return;
     }
@@ -507,12 +507,12 @@ export class CallNet {
         ignoreStaleCallSess(frame.sess, this.peerSess.get(frame.from)) ||
         ignoreStaleCallBye(frame.ts, this.peerSigAt.get(frame.from) ?? 0)
       ) {
-        this.trace("bye atrasado", "info", frame.from);
+        this.trace("stale bye", "info", frame.from);
         return;
       }
       // Peer remounted CallNet and spammed bye while still seated — ignore.
       if (this.wantPeers.has(frame.from) || this.roster.includes(frame.from)) {
-        this.trace("bye ignorado (ainda na sala)", "info", frame.from);
+        this.trace("bye ignored (still in room)", "info", frame.from);
         return;
       }
       this.drop(frame.from, true);
@@ -527,7 +527,7 @@ export class CallNet {
 
   stop(quiet = false) {
     if (this.stopped) return;
-    this.trace("call encerrada", "info");
+    this.trace("call ended", "info");
     this.stopped = true;
     for (const peer of [...this.offerRetry.keys()]) this.clearOfferRetry(peer);
     for (const peer of [...this.peerDropTimer.keys()]) this.cancelPeerDrop(peer);
@@ -585,7 +585,7 @@ export class CallNet {
             kind: "answer",
             sdp: pc.localDescription?.sdp,
           });
-          this.trace("resposta reenviada", "info", frame.from);
+          this.trace("answer resent", "info", frame.from);
           return;
         }
         const collision = this.makingOffer.has(frame.from) || pc.signalingState !== "stable";
@@ -598,7 +598,7 @@ export class CallNet {
         }
         if (!stillMine()) return;
         await pc.setRemoteDescription({ type: "offer", sdp: frame.sdp });
-        this.trace("oferta recebida", "info", frame.from);
+        this.trace("offer received", "info", frame.from);
         await this.flushIce(frame.from);
         await this.waitForMic(800);
         if (!stillMine()) return;
@@ -620,17 +620,17 @@ export class CallNet {
           kind: "answer",
           sdp: pc.localDescription?.sdp,
         });
-        this.trace("resposta enviada", "info", frame.from);
+        this.trace("answer sent", "info", frame.from);
         this.ignoreOffer.delete(frame.from);
       } else if (frame.kind === "answer" && frame.sdp) {
         if (pc.signalingState !== "have-local-offer") return;
         if (!answerMatchesLocalOffer(pc.localDescription?.sdp, frame.sdp)) {
-          this.trace("resposta atrasada (m-lines)", "info", frame.from);
+          this.trace("stale answer (m-lines)", "info", frame.from);
           return;
         }
         await pc.setRemoteDescription({ type: "answer", sdp: frame.sdp });
         if (!stillMine()) return;
-        this.trace("resposta recebida", "ok", frame.from);
+        this.trace("answer received", "ok", frame.from);
         this.clearOfferRetry(frame.from);
         await this.flushIce(frame.from);
         this.bindSenders(pc, frame.from);
@@ -652,7 +652,7 @@ export class CallNet {
         }
       }
     } catch (err) {
-      this.trace(`sinal rtc: ${String(err)}`, "err", frame.from);
+      this.trace(`rtc signal: ${String(err)}`, "err", frame.from);
     }
   }
 
@@ -693,7 +693,7 @@ export class CallNet {
         const ticks = (this.oneWayTicks.get(peer) ?? 0) + 1;
         this.oneWayTicks.set(peer, ticks);
         if (ticks === 2 || ticks === 4) {
-          if (ticks === 2) this.trace("envio fraco — reanexando mic", "warn", peer);
+          if (ticks === 2) this.trace("weak send — reattaching mic", "warn", peer);
           await this.pushLocal(peer);
         }
       } else {
@@ -720,7 +720,7 @@ export class CallNet {
     if (now - (this.reconnectAt.get(peer) ?? 0) < 8000) return;
     this.reconnectAt.set(peer, now);
     if (rtcPolite(this.me, peer)) return;
-    this.trace("religando ICE", "warn", peer);
+    this.trace("restarting ICE", "warn", peer);
     try {
       pc.restartIce();
     } catch {
@@ -902,11 +902,11 @@ export class CallNet {
         if (!stream.getTracks().some((t) => t.id === ev.track.id)) stream.addTrack(ev.track);
         if (ev.track.kind === "audio" && !this.heard.has(fromPeer)) {
           this.heard.add(fromPeer);
-          this.trace("áudio chegou", "ok", fromPeer);
+          this.trace("audio arrived", "ok", fromPeer);
         }
         if (isScreen && trackLooksLive(ev.track) && !this.seenScreen.has(fromPeer)) {
           this.seenScreen.add(fromPeer);
-          this.trace("tela chegou", "ok", fromPeer);
+          this.trace("screen arrived", "ok", fromPeer);
         }
         this.rememberInbound(fromPeer, isScreen, ev.track.kind, ev.track);
         this.forwardTrack(fromPeer, ev.track.kind, isScreen, ev.track);
@@ -933,7 +933,7 @@ export class CallNet {
           state === "failed" &&
           (ice === "connected" || ice === "completed" || ice === "checking")
         ) {
-          this.trace("enlace falhou (ICE segue · mantendo)", "warn", peer);
+          this.trace("link failed (ICE still going · keeping)", "warn", peer);
           return;
         }
         const text = pcTraceText(state);
@@ -1048,7 +1048,7 @@ export class CallNet {
       if (this.stopped || this.pcs.get(peer) !== pc) return;
       const ice = pc.iceConnectionState;
       if (ice !== "checking" && ice !== "disconnected") return;
-      this.trace("ICE travou · religando", "warn", peer);
+      this.trace("ICE stuck · restarting", "warn", peer);
       this.maybeReconnect(peer, pc);
     }, 12000);
     this.iceStuckTimer.set(peer, id);
@@ -1080,7 +1080,7 @@ export class CallNet {
           kind: "offer",
           sdp: pc.localDescription.sdp,
         });
-        this.trace("reenviando oferta", "info", peer);
+        this.trace("resending offer", "info", peer);
         return;
       }
       // Answer already applied — don't mint a fresh offer while ICE is still checking.
@@ -1326,14 +1326,14 @@ export class CallNet {
       const screenOk = await this.attachTrack(screenSender, scr);
       if (scr && !screenSender && !this.seenScreen.has(`send:${peer}`)) {
         this.seenScreen.add(`send:${peer}`);
-        this.trace("tela sem canal de envio", "warn", peer);
+        this.trace("screen has no send channel", "warn", peer);
       } else if (scr && screenOk && screenSender?.track?.id === scr.id && !this.seenScreen.has(`send:${peer}`)) {
         this.seenScreen.add(`send:${peer}`);
-        this.trace("tela anexada", "info", peer);
+        this.trace("screen attached", "info", peer);
         window.setTimeout(() => void this.logScreenBytes(peer, screenSender), 1500);
       } else if (scr && !screenOk && !this.seenScreen.has(`fail:${peer}`)) {
         this.seenScreen.add(`fail:${peer}`);
-        this.trace("tela não anexou", "err", peer);
+        this.trace("screen attach failed", "err", peer);
       } else if (!scr) {
         this.seenScreen.delete(`send:${peer}`);
         this.seenScreen.delete(`fail:${peer}`);
@@ -1359,7 +1359,7 @@ export class CallNet {
       }
       const mime = codecs.get(codecId) ?? "";
       this.trace(
-        bytes > 0 ? `tela ${bytes} B ${mime}` : `tela 0 B ${mime || "sem RTP"}`,
+        bytes > 0 ? `screen ${bytes} B ${mime}` : `screen 0 B ${mime || "no RTP"}`,
         bytes > 0 ? "ok" : "warn",
         peer,
       );
@@ -1417,7 +1417,7 @@ export class CallNet {
       kind: "offer",
       sdp: pc.localDescription!.sdp,
     });
-    this.trace("oferta enviada", "info", peer);
+    this.trace("offer sent", "info", peer);
     this.armOfferRetry(peer);
   }
 
@@ -1498,7 +1498,7 @@ export class CallNet {
       if (key.startsWith(`${peer}|`) || key.includes(`|${peer}|`)) this.fwdSenders.delete(key);
     }
     this.dropSinks(peer);
-    this.trace(silent ? "par saiu" : "enlace fechado", "warn", peer);
+    this.trace(silent ? "peer left" : "link closed", "warn", peer);
     this.noteMode();
     this.onGone(peer);
   }

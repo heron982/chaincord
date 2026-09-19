@@ -132,7 +132,7 @@ async fn rtc_share_screen(on: bool, app: tauri::AppHandle) -> Result<(), String>
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (on, app);
-        Err("captura nativa só no Linux".into())
+        Err("Native capture is only available on Linux".into())
     }
 }
 
@@ -238,7 +238,7 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("erro ao abrir o Chaincord");
+        .expect("failed to start Chaincord");
 }
 
 fn allow_media(window: &WebviewWindow) {

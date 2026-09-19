@@ -1,94 +1,94 @@
 [[permission]]
 identifier = "allow-get-state"
-description = "Ler estado da UI"
+description = "Read UI state"
 commands.allow = ["get_state"]
 
 [[permission]]
 identifier = "allow-create-community"
-description = "Criar comunidade"
+description = "Create community"
 commands.allow = ["create_community"]
 
 [[permission]]
 identifier = "allow-join-community"
-description = "Entrar com convite"
+description = "Join with invite"
 commands.allow = ["join_community"]
 
 [[permission]]
 identifier = "allow-switch-community"
-description = "Alternar comunidade ativa"
+description = "Switch active community"
 commands.allow = ["switch_community"]
 
 [[permission]]
 identifier = "allow-send-chat"
-description = "Enviar mensagem ao vivo"
+description = "Send live chat message"
 commands.allow = ["send_chat"]
 
 [[permission]]
 identifier = "allow-leave-community"
-description = "Sair da comunidade"
+description = "Leave community"
 commands.allow = ["leave_community"]
 
 [[permission]]
 identifier = "allow-add-room"
-description = "Criar canal ou sala de chamada"
+description = "Create text channel or voice room"
 commands.allow = ["add_room"]
 
 [[permission]]
 identifier = "allow-join-call"
-description = "Entrar numa sala de chamada"
+description = "Join a voice room"
 commands.allow = ["join_call"]
 
 [[permission]]
 identifier = "allow-leave-call"
-description = "Sair da sala de chamada"
+description = "Leave voice room"
 commands.allow = ["leave_call"]
 
 [[permission]]
 identifier = "allow-send-signal"
-description = "Sinalizacao WebRTC"
+description = "WebRTC signaling"
 commands.allow = ["send_signal"]
 
 [[permission]]
 identifier = "allow-rtc-start"
-description = "Abrir motor nativo de call no Linux"
+description = "Start native call engine on Linux"
 commands.allow = ["rtc_start"]
 
 [[permission]]
 identifier = "allow-rtc-stop"
-description = "Encerrar motor nativo de call no Linux"
+description = "Stop native call engine on Linux"
 commands.allow = ["rtc_stop"]
 
 [[permission]]
 identifier = "allow-rtc-sync"
-description = "Atualizar peers da call nativa"
+description = "Update native call peers"
 commands.allow = ["rtc_sync"]
 
 [[permission]]
 identifier = "allow-rtc-signal"
-description = "Sinalizacao da call nativa"
+description = "Native call signaling"
 commands.allow = ["rtc_signal"]
 
 [[permission]]
 identifier = "allow-rtc-push-frame"
-description = "Enviar frame de camera ou tela na call nativa"
+description = "Send camera or screen frame in native call"
 commands.allow = ["rtc_push_frame"]
 
 [[permission]]
 identifier = "allow-save-profile"
-description = "Salvar nome e foto do perfil"
+description = "Save profile name and avatar"
 commands.allow = ["save_profile"]
 
 [[permission]]
 identifier = "allow-publish-presence"
-description = "Publicar nome, foto e mudo na call"
+description = "Publish name, avatar, and mute state in call"
 commands.allow = ["publish_presence"]
 
 [[permission]]
 identifier = "allow-get-history"
-description = "Ler historico local do chat"
+description = "Read local chat history"
 commands.allow = ["get_history"]
 
 [[permission]]
 identifier = "allow-append-call-log"
-description = "Gravar log da call em arquivo"
+description = "Append call log to file"
 commands.allow = ["append_call_log"]

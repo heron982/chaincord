@@ -272,7 +272,7 @@ export function App() {
     setCallNotice(null);
   };
 
-  const meName = state?.displayName?.trim() || "você";
+  const meName = state?.displayName?.trim() || "you";
 
   const saveProfile = async (displayName: string, avatar: string) => {
     await backendSaveProfile(displayName, avatar);
@@ -508,7 +508,7 @@ export function App() {
       room,
       (frame) => {
         void backendSendRtc(frame).catch((err) => {
-          setCallNotice(`Não deu para enviar o sinal da call: ${String(err)}`);
+          setCallNotice(`Couldn't send call signal: ${String(err)}`);
         });
       },
       (media) => {
@@ -564,7 +564,7 @@ export function App() {
       const text = (await navigator.clipboard.readText()).trim();
       if (text) setInvite(text);
     } catch {
-      setAddError("Não deu para ler a área de transferência. Cole com Ctrl+V.");
+      setAddError("Couldn't read the clipboard. Paste with Ctrl+V.");
     }
   };
 
@@ -597,7 +597,7 @@ export function App() {
       onClick={(e) => e.stopPropagation()}
     >
       <button type="button" onClick={() => void copyInvite("message")}>
-        {copied ? "Convite copiado" : "Copiar convite"}
+        {copied ? "Invite copied" : "Copy invite"}
       </button>
       <button
         type="button"
@@ -606,10 +606,10 @@ export function App() {
           setShareOpen(true);
         }}
       >
-        Mostrar convite
+        Show invite
       </button>
       <button type="button" className="danger" onClick={openLeave}>
-        Sair da comunidade
+        Leave community
       </button>
     </div>
   );
@@ -650,7 +650,7 @@ export function App() {
       setInvite("");
       stopMedia();
     } catch (err) {
-      setAddError(String(err).replace(/^Error:\s*/i, "") || "Convite inválido.");
+      setAddError(String(err).replace(/^Error:\s*/i, "") || "Invalid invite.");
     } finally {
       setAddBusy(false);
     }
@@ -722,7 +722,7 @@ export function App() {
           attachMic(stream);
           setMicEpoch((n) => n + 1);
         } catch {
-          setCallNotice("Sem microfone neste dispositivo. A sala abre; câmera ainda pode ligar.");
+          setCallNotice("No microphone on this device. The room still opens; you can turn the camera on.");
         }
       } else {
         attachMic(camStream.current);
@@ -845,7 +845,7 @@ export function App() {
       callRef.current?.setCamera(mixed);
       setCallNotice(null);
     } catch {
-      setCallNotice("Não deu para ligar a câmera neste dispositivo.");
+      setCallNotice("Couldn't turn the camera on on this device.");
     }
   };
 
@@ -869,7 +869,7 @@ export function App() {
         void backendPresence(micMuted, deafened, shownPresence, true);
         setCallNotice(null);
       } catch {
-        setCallNotice("Não deu para compartilhar a tela neste dispositivo.");
+        setCallNotice("Couldn't share your screen on this device.");
       }
       return;
     }
@@ -897,7 +897,7 @@ export function App() {
       callRef.current?.setScreen(stream);
       setCallNotice(null);
     } catch {
-      setCallNotice("Não deu para compartilhar a tela neste dispositivo.");
+      setCallNotice("Couldn't share your screen on this device.");
     }
   };
 
@@ -915,13 +915,13 @@ export function App() {
     return (
       <div className="setup-screen">
         {inApp ? (
-          <p className="muted">Abrindo…</p>
+          <p className="muted">Opening…</p>
         ) : (
           <div className="panel">
-            <h2>Isso não é o app</h2>
+            <h2>This isn't the app</h2>
             <p className="muted">
-              Esta aba do browser só tem a interface. O núcleo (convite, chat, call) vive na janela
-              nativa. Feche esta aba e use o Chaincord que o <code>tauri:dev</code> abre, ou o
+              This browser tab is only the UI. The core (invites, chat, calls) runs in the native
+              window. Close this tab and use the Chaincord window from <code>tauri:dev</code> or the
               <code>.exe</code>.
             </p>
           </div>
@@ -935,11 +935,11 @@ export function App() {
       <div className="setup-screen">
         <div className="panel">
           <ProfileEditor
-            title="Criar seu perfil"
-            subtitle="Escolha um nome e uma foto. É assim que você aparece nas comunidades."
+            title="Create your profile"
+            subtitle="Pick a name and photo. This is how you show up in communities."
             initialName=""
             initialAvatar=""
-            submitLabel="Entrar"
+            submitLabel="Continue"
             onSave={saveProfile}
           />
         </div>
@@ -950,7 +950,7 @@ export function App() {
   return (
     <div className="shell">
       {callNotice && <div className="app-toast">{callNotice}</div>}
-      <aside className="rail" aria-label="Comunidades">
+      <aside className="rail" aria-label="Communities">
         {(state?.communities ?? []).map((guild) => {
           const active = guild.id === state?.communityId;
           return (
@@ -978,7 +978,7 @@ export function App() {
         })}
         <button
           className="guild ghost"
-          title="Criar ou entrar numa comunidade"
+          title="Create or join a community"
           onClick={() => openAdd("create")}
         >
           +
@@ -1001,7 +1001,7 @@ export function App() {
                 <span>
                   <strong>{state?.communityName}</strong>
                   <span className="muted">
-                    {alone ? "E2EE · só você aqui" : `E2EE · ${peerCount} no histórico`}
+                    {alone ? "E2EE · just you here" : `E2EE · ${peerCount} in history`}
                   </span>
                 </span>
                 <span className="chevron">{menu?.kind === "head" ? "▴" : "▾"}</span>
@@ -1011,8 +1011,8 @@ export function App() {
 
             <div className="nav-block">
               <div className="nav-label-row">
-                <span className="nav-label">Canais de texto</span>
-                <button className="add-ch" title="Novo canal" onClick={() => setNewRoomOpen("text")}>
+                <span className="nav-label">Text channels</span>
+                <button className="add-ch" title="New channel" onClick={() => setNewRoomOpen("text")}>
                   +
                 </button>
               </div>
@@ -1029,13 +1029,13 @@ export function App() {
 
             <div className="nav-block grow">
               <div className="nav-label-row">
-                <span className="nav-label">Salas de chamada</span>
-                <button className="add-ch" title="Nova sala" onClick={() => setNewRoomOpen("call")}>
+                <span className="nav-label">Voice rooms</span>
+                <button className="add-ch" title="New room" onClick={() => setNewRoomOpen("call")}>
                   +
                 </button>
               </div>
               {callRooms.length === 0 && (
-                <p className="muted pad">Nenhuma sala. Crie uma para câmera e tela.</p>
+                <p className="muted pad">No rooms yet. Create one for camera and screen share.</p>
               )}
               {callRooms.map((room) => {
                 const here = [...new Set(voice[room] ?? [])];
@@ -1056,7 +1056,7 @@ export function App() {
                       <span className="voice-ico">🔊</span>
                       <span>{room}</span>
                       {sharing && (
-                        <span className="voice-live" title="Alguém está compartilhando a tela">
+                        <span className="voice-live" title="Someone is sharing their screen">
                           <ScreenIcon />
                         </span>
                       )}
@@ -1080,7 +1080,7 @@ export function App() {
                               <span className="voice-nick">{face.name}</span>
                               <span className="voice-flags">
                                 {face.sharingScreen && (
-                                  <span title="Transmitindo a tela">
+                                  <span title="Sharing screen">
                                     <ScreenIcon />
                                   </span>
                                 )}
@@ -1099,14 +1099,14 @@ export function App() {
           </>
         ) : (
           <div className="empty-side">
-            <strong>Nenhuma comunidade</strong>
-            <p className="muted">Crie uma sala ou entre com um convite curto.</p>
+            <strong>No communities</strong>
+            <p className="muted">Create a room or join with a short invite.</p>
             <div className="row">
               <button type="button" onClick={() => openAdd("create")}>
-                Criar
+                Create
               </button>
               <button type="button" className="secondary" onClick={() => openAdd("join")}>
-                Entrar
+                Join
               </button>
             </div>
           </div>
@@ -1172,7 +1172,7 @@ export function App() {
                   if (!people.length) {
                     return (
                       <div className="stage-empty">
-                        <p className="muted">Ninguém na sala agora.</p>
+                        <p className="muted">No one in the room right now.</p>
                       </div>
                     );
                   }
@@ -1218,7 +1218,7 @@ export function App() {
                     if (screenLive) {
                       tiles.push({
                         id: screenTileId(pk),
-                        name: `${face.name} · tela`,
+                        name: `${face.name} · screen`,
                         avatar: face.avatar,
                         stream: screen?.stream ?? new MediaStream(),
                         showVideo: true,
@@ -1326,7 +1326,7 @@ export function App() {
                 {callNotice && <p className="sys error stage-note">{callNotice}</p>}
                 <div className="call-bar">
                   <button type="button" className={camOn ? "on" : ""} onClick={() => void toggleCam()}>
-                    {camOn ? "Desligar câmera" : "Câmera"}
+                    {camOn ? "Turn off camera" : "Camera"}
                   </button>
                   <button
                     type="button"
@@ -1334,12 +1334,12 @@ export function App() {
                     disabled={screenBlocked}
                     title={
                       screenBlocked
-                        ? "Grupo (3+) precisa de um desktop SFU na call"
-                        : "Compartilhar tela"
+                        ? "Group (3+) needs a desktop hub in the call"
+                        : "Share screen"
                     }
                     onClick={() => void toggleScreen()}
                   >
-                    Tela
+                    Screen
                   </button>
                   <button
                     type="button"
@@ -1347,7 +1347,7 @@ export function App() {
                     onClick={() => void hangUp()}
                     disabled={myCall !== selected.name}
                   >
-                    Desligar
+                    Disconnect
                   </button>
                 </div>
               </div>
@@ -1358,7 +1358,7 @@ export function App() {
                 <div>
                   <h1># {selected.name}</h1>
                   <p className="muted">
-                    {state?.communityName} · E2EE · {peerCount} storage peers
+                    {state?.communityName} · E2EE · {peerCount} peers
                   </p>
                 </div>
               </header>
@@ -1385,23 +1385,23 @@ export function App() {
                 <input
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  placeholder={`Mensagem em #${selected.name}`}
+                  placeholder={`Message in #${selected.name}`}
                 />
-                <button type="submit">Enviar</button>
+                <button type="submit">Send</button>
               </form>
             </>
           )
         ) : (
           <div className="welcome">
             <h1>Chaincord</h1>
-            <p>Chat e calls entre peers, sem servidor central.</p>
-            <p className="muted">Crie uma comunidade ou cole um convite para entrar.</p>
+            <p>Peer-to-peer chat and calls, no central server.</p>
+            <p className="muted">Create a community or paste an invite to join.</p>
             <div className="welcome-actions">
               <button type="button" onClick={() => openAdd("create")}>
-                Criar comunidade
+                Create community
               </button>
               <button type="button" className="secondary" onClick={() => openAdd("join")}>
-                Entrar com convite
+                Join with invite
               </button>
             </div>
           </div>
@@ -1409,12 +1409,12 @@ export function App() {
       </section>
 
       {inCommunity && (
-        <aside className="members-pane" aria-label="Membros">
+        <aside className="members-pane" aria-label="Members">
           {alone && (
             <p className="alone-hint">
-              <strong>Só você por enquanto.</strong> Copie o convite no menu da comunidade e
-              envie. Os dois precisam ter o app aberto. Na internet, o seu PC tem que aceitar a
-              conexão (mesma rede, VPS ou porta aberta).
+              <strong>Just you for now.</strong> Copy the invite from the community menu and send it.
+              Both people need the app open. Over the internet, your PC must accept incoming
+              connections (same network, VPS, or open port).
             </p>
           )}
           {PRESENCE_GROUPS.map((group) => {
@@ -1445,14 +1445,14 @@ export function App() {
                           className={`presence-dot ${status}${pulsing ? " seeding" : ""}`}
                           title={
                             pulsing
-                              ? `${presenceLabel(status)} · enviando histórico`
+                              ? `${presenceLabel(status)} · syncing history`
                               : presenceLabel(status)
                           }
                         />
                       </span>
                       <span>{mine ? meName : face.name}</span>
                       {face.sharingScreen && seatedInVoice(pk) && (
-                        <span className="member-live" title="Transmitindo a tela">
+                        <span className="member-live" title="Sharing screen">
                           <ScreenIcon />
                         </span>
                       )}
@@ -1469,15 +1469,15 @@ export function App() {
         <div
           className="modal"
           role="dialog"
-          aria-label={addMode === "create" ? "Criar comunidade" : "Entrar com convite"}
+          aria-label={addMode === "create" ? "Create community" : "Join with invite"}
           onClick={() => !addBusy && setAddOpen(false)}
         >
           <div className="panel" onClick={(e) => e.stopPropagation()}>
-            <h2>{addMode === "create" ? "Criar comunidade" : "Entrar com convite"}</h2>
+            <h2>{addMode === "create" ? "Create community" : "Join with invite"}</h2>
             {inCommunity && (
               <p className="field-hint">
-                Você continua em <b>{state?.communityName}</b>. Criar ou entrar adiciona outra
-                comunidade na barra — não apaga esta.
+                You stay in <b>{state?.communityName}</b>. Creating or joining adds another
+                community to the sidebar — it does not remove this one.
               </p>
             )}
             <div className="tabs">
@@ -1489,7 +1489,7 @@ export function App() {
                   setAddError(null);
                 }}
               >
-                Criar
+                Create
               </button>
               <button
                 type="button"
@@ -1499,30 +1499,30 @@ export function App() {
                   setAddError(null);
                 }}
               >
-                Entrar
+                Join
               </button>
             </div>
             {addMode === "create" ? (
               <form onSubmit={onCreate} className="stack">
                 <label className="field">
-                  <span>Nome</span>
+                  <span>Name</span>
                   <input
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="ex: equipe, amigos"
+                    placeholder="e.g. team, friends"
                     maxLength={64}
                     autoFocus
                     disabled={addBusy}
                   />
                 </label>
                 <p className="field-hint">
-                  Depois você copia um convite. Quem entra não configura servidor — o app de quem
-                  criou já é o relé, se a máquina aceitar conexão.
+                  After that you copy an invite. New members don't configure a server — the
+                  creator's app is the relay when their machine accepts connections.
                 </p>
                 {addError && <p className="form-error">{addError}</p>}
                 <div className="row">
                   <button type="submit" disabled={!name.trim() || addBusy}>
-                    {addBusy ? "Criando…" : "Criar"}
+                    {addBusy ? "Creating…" : "Create"}
                   </button>
                   <button
                     type="button"
@@ -1530,18 +1530,18 @@ export function App() {
                     disabled={addBusy}
                     onClick={() => setAddOpen(false)}
                   >
-                    Cancelar
+                    Cancel
                   </button>
                 </div>
               </form>
             ) : (
               <form onSubmit={onJoin} className="stack">
                 <label className="field">
-                  <span>Convite</span>
+                  <span>Invite</span>
                   <textarea
                     value={invite}
                     onChange={(e) => setInvite(e.target.value)}
-                    placeholder="Cole o código cc/… ou a mensagem inteira"
+                    placeholder="Paste the cc/… code or the full message"
                     rows={4}
                     autoFocus
                     disabled={addBusy}
@@ -1549,12 +1549,12 @@ export function App() {
                   />
                 </label>
                 <p className="field-hint">
-                  Pode colar o texto do WhatsApp/Discord inteiro. O app acha o código.
+                  You can paste the full WhatsApp/Discord message. The app finds the code.
                 </p>
                 {addError && <p className="form-error">{addError}</p>}
                 <div className="row">
                   <button type="submit" disabled={!invite.trim() || addBusy}>
-                    {addBusy ? "Entrando…" : "Entrar"}
+                    {addBusy ? "Joining…" : "Join"}
                   </button>
                   <button
                     type="button"
@@ -1562,7 +1562,7 @@ export function App() {
                     disabled={addBusy}
                     onClick={() => void pasteInvite()}
                   >
-                    Colar
+                    Paste
                   </button>
                   <button
                     type="button"
@@ -1570,7 +1570,7 @@ export function App() {
                     disabled={addBusy}
                     onClick={() => setAddOpen(false)}
                   >
-                    Cancelar
+                    Cancel
                   </button>
                 </div>
               </form>
@@ -1583,36 +1583,36 @@ export function App() {
         <div
           className="modal"
           role="dialog"
-          aria-label="Compartilhar convite"
+          aria-label="Share invite"
           onClick={() => setShareOpen(false)}
         >
           <div className="panel invite-share" onClick={(e) => e.stopPropagation()}>
-            <h2>Convite para {state.communityName}</h2>
+            <h2>Invite to {state.communityName}</h2>
             <p>
-              Envie esta mensagem. Quem receber abre o Chaincord em{" "}
-              <b>Entrar com convite</b> e cola.
+              Send this message. Recipients open Chaincord, go to{" "}
+              <b>Join with invite</b>, and paste.
             </p>
             <pre className="invite-preview">{inviteShareText(state.communityName, state.invite)}</pre>
-            <code className="invite-code" title="Clique para selecionar">
+            <code className="invite-code" title="Click to select">
               {state.invite}
             </code>
             <p className="field-hint">
-              Deixe o app aberto. Na mesma rede já basta. De outra rede, o seu PC precisa
-              aceitar a conexão.
+              Keep the app open. Same network is enough. From another network, your PC must accept
+              incoming connections.
             </p>
             <div className="row">
               <button type="button" onClick={() => void copyInvite("message")}>
-                {copied === "message" ? "Mensagem copiada" : "Copiar mensagem"}
+                {copied === "message" ? "Message copied" : "Copy message"}
               </button>
               <button
                 type="button"
                 className="ghost"
                 onClick={() => void copyInvite("code")}
               >
-                {copied === "code" ? "Código copiado" : "Só o código"}
+                {copied === "code" ? "Code copied" : "Code only"}
               </button>
               <button type="button" className="ghost" onClick={() => setShareOpen(false)}>
-                Pronto
+                Done
               </button>
             </div>
           </div>
@@ -1622,17 +1622,17 @@ export function App() {
       {newRoomOpen && (
         <div className="modal" role="dialog">
           <div className="panel">
-            <h2>{newRoomOpen === "call" ? "Nova sala de chamada" : "Novo canal de texto"}</h2>
+            <h2>{newRoomOpen === "call" ? "New voice room" : "New text channel"}</h2>
             <form onSubmit={onAddRoom} className="stack">
               <input
                 value={newRoomName}
                 onChange={(e) => setNewRoomName(e.target.value)}
-                placeholder={newRoomOpen === "call" ? "ex: geral" : "ex: development"}
+                placeholder={newRoomOpen === "call" ? "e.g. general" : "e.g. development"}
                 autoFocus
               />
               <div className="row">
                 <button type="submit" disabled={!newRoomName.trim()}>
-                  Criar
+                  Create
                 </button>
                 <button
                   type="button"
@@ -1642,7 +1642,7 @@ export function App() {
                     setNewRoomName("");
                   }}
                 >
-                  Cancelar
+                  Cancel
                 </button>
               </div>
             </form>
@@ -1653,38 +1653,37 @@ export function App() {
       {leaveOpen && (
         <div className="modal" role="dialog">
           <div className="panel">
-            <h2>Sair de {state?.communityName}</h2>
+            <h2>Leave {state?.communityName}</h2>
             {alone ? (
               <>
                 <p>
-                  Você é o único membro online nesta comunidade. Sair remove só ela deste
-                  dispositivo; as outras comunidades na barra permanecem.
+                  You're the only member online in this community. Leaving removes only it from this
+                  device; other communities in the sidebar stay.
                 </p>
                 <div className="row">
                   <button type="button" onClick={() => void onLeave()}>
-                    Sair
+                    Leave
                   </button>
                   <button type="button" className="ghost" onClick={() => setLeaveOpen(false)}>
-                    Cancelar
+                    Cancel
                   </button>
                 </div>
               </>
             ) : (
               <>
                 <p>
-                  Há {otherPeers} outro(s) membro(s). No produto, a saída só completa depois de
-                  passar a parcela de histórico (def. 20). O handoff ainda não está ligado neste
-                  MVP.
+                  {otherPeers} other member(s) are here. In the full product, leaving finishes after
+                  handing off your history slice (default 20). Handoff is not wired in this MVP yet.
                 </p>
                 <div className="row">
                   <button type="button" disabled>
-                    Transferir e sair
+                    Transfer and leave
                   </button>
                   <button type="button" className="secondary" onClick={() => void onLeave()}>
-                    Sair mesmo assim
+                    Leave anyway
                   </button>
                   <button type="button" className="ghost" onClick={() => setLeaveOpen(false)}>
-                    Cancelar
+                    Cancel
                   </button>
                 </div>
               </>
@@ -1697,7 +1696,7 @@ export function App() {
         <div
           className="modal"
           role="dialog"
-          aria-label="Configurações do usuário"
+          aria-label="User settings"
           onClick={() => setSettingsOpen(false)}
         >
           <div className="panel settings-panel" onClick={(e) => e.stopPropagation()}>
@@ -1707,23 +1706,23 @@ export function App() {
                 className={settingsTab === "profile" ? "tab active" : "tab"}
                 onClick={() => setSettingsTab("profile")}
               >
-                Perfil
+                Profile
               </button>
               <button
                 type="button"
                 className={settingsTab === "audio" ? "tab active" : "tab"}
                 onClick={() => setSettingsTab("audio")}
               >
-                Áudio
+                Audio
               </button>
             </div>
             {settingsTab === "profile" ? (
               <ProfileEditor
-                title="Meu perfil"
-                subtitle="Nome e foto que as outras pessoas veem."
+                title="My profile"
+                subtitle="Name and photo others see."
                 initialName={state.displayName}
                 initialAvatar={state.avatar}
-                submitLabel="Salvar"
+                submitLabel="Save"
                 onCancel={() => setSettingsOpen(false)}
                 onSave={saveProfile}
               />
@@ -1777,12 +1776,12 @@ function VoiceDock({
   const grade = gradeLink(link);
   const title =
     grade === "wait"
-      ? "Conectando…"
+      ? "Connecting…"
       : grade === "off"
-        ? "Sem conexão"
+        ? "No connection"
         : grade === "bad"
-          ? "Conexão instável"
-          : "Voz conectada";
+          ? "Unstable connection"
+          : "Voice connected";
   const mode = link?.mode ?? "1:1";
   const ping = link?.rttMs != null ? `${link.rttMs} ms` : null;
   const where = community ? `${room} / ${community}` : room;
@@ -1810,15 +1809,15 @@ function VoiceDock({
         {open && (
           <div className="voice-tip" onClick={(e) => e.stopPropagation()}>
             <strong>{title}</strong>
-            <p>{ping ? `Latência ${ping}` : "Medindo latência…"}</p>
+            <p>{ping ? `Latency ${ping}` : "Measuring latency…"}</p>
             <p>
-              {link?.lossPct != null ? `Perda ${link.lossPct}%` : "Perda —"}
+              {link?.lossPct != null ? `Loss ${link.lossPct}%` : "Loss —"}
               {link?.jitterMs != null ? ` · jitter ${link.jitterMs} ms` : ""}
             </p>
             <p>
               {link && link.peers > 0
-                ? `${link.live}/${link.peers} ligações ativas`
-                : "Só você na sala"}
+                ? `${link.live}/${link.peers} active links`
+                : "Only you in the room"}
             </p>
             <p>{callPathHint(mode)}</p>
           </div>
@@ -1833,7 +1832,7 @@ function VoiceDock({
         <strong>{title}</strong>
         <span>{sub}</span>
       </div>
-      <button type="button" className="hang-mini" title="Desligar" onClick={onHang}>
+      <button type="button" className="hang-mini" title="Disconnect" onClick={onHang}>
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden>
           <path
             fill="currentColor"
@@ -1905,7 +1904,7 @@ function SeedCard({
         <i style={{ width: `${pct}%` }} />
       </div>
       <span className="muted">
-        {fmtBytes(Math.min(sent, total))} de {fmtBytes(total)}
+        {fmtBytes(Math.min(sent, total))} of {fmtBytes(total)}
         {messages > 0 ? ` · ${messages} msg` : ""}
       </span>
     </div>
@@ -2048,12 +2047,12 @@ function CallCard({
   const canWatch = showVideo || screen;
   const pausedMsg = !watching
     ? local
-      ? "Preview oculto"
+      ? "Preview hidden"
       : screen
-        ? "Não está assistindo a tela"
-        : "Não está assistindo a câmera"
+        ? "Not watching screen"
+        : "Not watching camera"
     : screen && !showVideo
-      ? "Aguardando tela"
+      ? "Waiting for screen"
       : "";
   const cls = [
     "tile-card",
@@ -2083,7 +2082,7 @@ function CallCard({
           else onToggle?.();
         }
       }}
-      title={theater ? "Sair da tela cheia" : expanded ? "Recolher" : "Ampliar"}
+      title={theater ? "Exit fullscreen" : expanded ? "Minimize" : "Expand"}
     >
       {live && paint ? (
         <FrameImg tileId={id} />
@@ -2106,7 +2105,7 @@ function CallCard({
               onWatch?.();
             }}
           >
-            {watching ? (local ? "Ocultar" : "Não assistir") : local ? "Mostrar" : "Assistir"}
+            {watching ? (local ? "Hide" : "Stop watching") : local ? "Show" : "Watch"}
           </button>
         )}
         <button
@@ -2116,7 +2115,7 @@ function CallCard({
             onToggle?.();
           }}
         >
-          {expanded ? "Recolher" : "Ampliar"}
+          {expanded ? "Minimize" : "Expand"}
         </button>
         <button
           type="button"
@@ -2125,7 +2124,7 @@ function CallCard({
             onTheater?.();
           }}
         >
-          {theater ? "Sair da tela cheia" : "Tela cheia"}
+          {theater ? "Exit fullscreen" : "Fullscreen"}
         </button>
       </div>
       <span className="tile-tag">
@@ -2195,7 +2194,7 @@ function HubIcon() {
       width="14"
       height="14"
       aria-hidden
-      title="esta pessoa está encaminhando a call"
+      title="this person is forwarding the call"
     >
       <path
         fill="currentColor"

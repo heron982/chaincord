@@ -38,7 +38,7 @@ export function AudioSettings({
     let dead = false;
     const load = async () => {
       if (!navigator.mediaDevices?.enumerateDevices) {
-        setErr("Este dispositivo não lista aparelhos de áudio.");
+        setErr("This device can't list audio hardware.");
         return;
       }
       try {
@@ -47,7 +47,7 @@ export function AudioSettings({
         setInputs(audioDevicesOfKind(list, "audioinput"));
         setOutputs(audioDevicesOfKind(list, "audiooutput"));
       } catch {
-        if (!dead) setErr("Não deu para listar os aparelhos de áudio.");
+        if (!dead) setErr("Couldn't list audio devices.");
       }
     };
     void load();
@@ -82,7 +82,7 @@ export function AudioSettings({
         setInputs(audioDevicesOfKind(list, "audioinput"));
         setOutputs(audioDevicesOfKind(list, "audiooutput"));
       } catch {
-        if (!dead) setErr("Permita o microfone para ver os aparelhos e testar o áudio.");
+        if (!dead) setErr("Allow the microphone to see devices and test audio.");
       }
     })();
     return () => {
@@ -94,21 +94,21 @@ export function AudioSettings({
   const changeInput = (id: string) => {
     setErr(null);
     void Promise.resolve(onInput(id)).catch(() => {
-      setErr("Não deu para usar este microfone.");
+      setErr("Couldn't use this microphone.");
     });
   };
 
   return (
     <div className="stack audio-settings">
-      <h2>Áudio</h2>
-      <p>Se o microfone ou o som da call estiverem no aparelho errado, escolha aqui.</p>
+      <h2>Audio</h2>
+      <p>If call mic or sound is on the wrong device, pick it here.</p>
       <label className="field">
-        <span>Microfone</span>
+        <span>Microphone</span>
         <select
           value={listedInput}
           onChange={(e) => changeInput(e.target.value)}
         >
-          <option value="">Padrão do sistema</option>
+          <option value="">System default</option>
           {inputs.map((device, i) => (
             <option key={device.deviceId} value={device.deviceId}>
               {audioDeviceLabel(device, i, "input")}
@@ -117,21 +117,21 @@ export function AudioSettings({
         </select>
       </label>
       <div className="field">
-        <span>Nível de entrada</span>
+        <span>Input level</span>
         <MicMeter stream={meterStream} />
         <p className="field-hint">
-          Fale alguma coisa. Se a barra não mexer, este não é o microfone certo — ou o
-          Windows está no aparelho de comunicações.
+          Say something. If the bar doesn't move, this isn't the right mic — or Windows is
+          using the communications device.
         </p>
       </div>
       <label className="field">
-        <span>Saída</span>
+        <span>Output</span>
         <select
           value={listedOutput}
           disabled={!sinkOk && outputs.length === 0}
           onChange={(e) => onOutput(e.target.value)}
         >
-          <option value="">Padrão do sistema</option>
+          <option value="">System default</option>
           {outputs.map((device, i) => (
             <option key={device.deviceId} value={device.deviceId}>
               {audioDeviceLabel(device, i, "output")}
@@ -141,8 +141,7 @@ export function AudioSettings({
       </label>
       {!sinkOk && (
         <p className="field-hint">
-          Este aparelho usa a saída padrão do sistema. A lista de fones pode não
-          aparecer.
+          This device uses the system default output. Headphones may not show up in the list.
         </p>
       )}
       {err && <p className="sys error">{err}</p>}
@@ -157,10 +156,10 @@ export function AudioSettings({
             void playOutputTest(outputId).finally(() => setTesting(false));
           }}
         >
-          Testar som
+          Test sound
         </button>
         <button type="button" className="ghost" onClick={onClose}>
-          Fechar
+          Close
         </button>
       </div>
     </div>

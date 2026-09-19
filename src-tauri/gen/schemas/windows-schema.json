@@ -177,118 +177,118 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Criar canal ou sala de chamada",
+          "description": "Create text channel or voice room",
           "type": "string",
           "const": "allow-add-room",
-          "markdownDescription": "Criar canal ou sala de chamada"
+          "markdownDescription": "Create text channel or voice room"
         },
         {
-          "description": "Gravar log da call em arquivo",
+          "description": "Append call log to file",
           "type": "string",
           "const": "allow-append-call-log",
-          "markdownDescription": "Gravar log da call em arquivo"
+          "markdownDescription": "Append call log to file"
         },
         {
-          "description": "Criar comunidade",
+          "description": "Create community",
           "type": "string",
           "const": "allow-create-community",
-          "markdownDescription": "Criar comunidade"
+          "markdownDescription": "Create community"
         },
         {
-          "description": "Ler historico local do chat",
+          "description": "Read local chat history",
           "type": "string",
           "const": "allow-get-history",
-          "markdownDescription": "Ler historico local do chat"
+          "markdownDescription": "Read local chat history"
         },
         {
-          "description": "Ler estado da UI",
+          "description": "Read UI state",
           "type": "string",
           "const": "allow-get-state",
-          "markdownDescription": "Ler estado da UI"
+          "markdownDescription": "Read UI state"
         },
         {
-          "description": "Entrar numa sala de chamada",
+          "description": "Join a voice room",
           "type": "string",
           "const": "allow-join-call",
-          "markdownDescription": "Entrar numa sala de chamada"
+          "markdownDescription": "Join a voice room"
         },
         {
-          "description": "Entrar com convite",
+          "description": "Join with invite",
           "type": "string",
           "const": "allow-join-community",
-          "markdownDescription": "Entrar com convite"
+          "markdownDescription": "Join with invite"
         },
         {
-          "description": "Sair da sala de chamada",
+          "description": "Leave voice room",
           "type": "string",
           "const": "allow-leave-call",
-          "markdownDescription": "Sair da sala de chamada"
+          "markdownDescription": "Leave voice room"
         },
         {
-          "description": "Sair da comunidade",
+          "description": "Leave community",
           "type": "string",
           "const": "allow-leave-community",
-          "markdownDescription": "Sair da comunidade"
+          "markdownDescription": "Leave community"
         },
         {
-          "description": "Publicar nome, foto e mudo na call",
+          "description": "Publish name, avatar, and mute state in call",
           "type": "string",
           "const": "allow-publish-presence",
-          "markdownDescription": "Publicar nome, foto e mudo na call"
+          "markdownDescription": "Publish name, avatar, and mute state in call"
         },
         {
-          "description": "Enviar frame de camera ou tela na call nativa",
+          "description": "Send camera or screen frame in native call",
           "type": "string",
           "const": "allow-rtc-push-frame",
-          "markdownDescription": "Enviar frame de camera ou tela na call nativa"
+          "markdownDescription": "Send camera or screen frame in native call"
         },
         {
-          "description": "Sinalizacao da call nativa",
+          "description": "Native call signaling",
           "type": "string",
           "const": "allow-rtc-signal",
-          "markdownDescription": "Sinalizacao da call nativa"
+          "markdownDescription": "Native call signaling"
         },
         {
-          "description": "Abrir motor nativo de call no Linux",
+          "description": "Start native call engine on Linux",
           "type": "string",
           "const": "allow-rtc-start",
-          "markdownDescription": "Abrir motor nativo de call no Linux"
+          "markdownDescription": "Start native call engine on Linux"
         },
         {
-          "description": "Encerrar motor nativo de call no Linux",
+          "description": "Stop native call engine on Linux",
           "type": "string",
           "const": "allow-rtc-stop",
-          "markdownDescription": "Encerrar motor nativo de call no Linux"
+          "markdownDescription": "Stop native call engine on Linux"
         },
         {
-          "description": "Atualizar peers da call nativa",
+          "description": "Update native call peers",
           "type": "string",
           "const": "allow-rtc-sync",
-          "markdownDescription": "Atualizar peers da call nativa"
+          "markdownDescription": "Update native call peers"
         },
         {
-          "description": "Salvar nome e foto do perfil",
+          "description": "Save profile name and avatar",
           "type": "string",
           "const": "allow-save-profile",
-          "markdownDescription": "Salvar nome e foto do perfil"
+          "markdownDescription": "Save profile name and avatar"
         },
         {
-          "description": "Enviar mensagem ao vivo",
+          "description": "Send live chat message",
           "type": "string",
           "const": "allow-send-chat",
-          "markdownDescription": "Enviar mensagem ao vivo"
+          "markdownDescription": "Send live chat message"
         },
         {
-          "description": "Sinalizacao WebRTC",
+          "description": "WebRTC signaling",
           "type": "string",
           "const": "allow-send-signal",
-          "markdownDescription": "Sinalizacao WebRTC"
+          "markdownDescription": "WebRTC signaling"
         },
         {
-          "description": "Alternar comunidade ativa",
+          "description": "Switch active community",
           "type": "string",
           "const": "allow-switch-community",
-          "markdownDescription": "Alternar comunidade ativa"
+          "markdownDescription": "Switch active community"
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
