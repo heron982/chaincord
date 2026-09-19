@@ -11,12 +11,27 @@ Thanks for helping. Chaincord is an **alpha** desktop chat (Tauri 2 + React + Ru
 
 ## Setup
 
+**External contributors:** fork [heron982/chaincord](https://github.com/heron982/chaincord) on GitHub, then:
+
 ```bash
+git clone https://github.com/<your-user>/chaincord.git
+cd chaincord
+git remote add upstream https://github.com/heron982/chaincord.git
 npm install
 npm test
 npm run test:core
 npm run tauri:dev
 ```
+
+Keep your fork current before starting work:
+
+```bash
+git fetch upstream
+git checkout master
+git merge upstream/master
+```
+
+**Maintainers** with push access can clone `heron982/chaincord` directly and skip the fork/`upstream` steps.
 
 Installer / release binary:
 
@@ -49,17 +64,19 @@ MLS, erasure-coded history, full SFU (`str0m`), platform MQTT broker, Hamachi-st
 
 ## Pull requests
 
-1. Branch from `master`
-2. Keep the change focused
-3. Run `npm test` and `npm run test:core` locally
-4. Describe **what** changed and **how** you tested
-5. Do not commit secrets, personal machine paths, or large binaries
+1. Fork the repo (unless you already have push access)
+2. Create a branch from up-to-date `master` (`git checkout -b fix/short-name`)
+3. Keep the change focused
+4. Run `npm test` and `npm run test:core` locally
+5. Push to **your fork** and open a PR against `heron982/chaincord` `master`
+6. Describe **what** changed and **how** you tested
+7. Do not commit secrets, personal machine paths, or large binaries
 
 Vulnerability reports: do **not** open a public issue — use [SECURITY.md](SECURITY.md).
 
-## Releases and auto-update
+## Releases and auto-update (maintainers)
 
-Windows installers are built by GitHub Actions on version tags (`v0.1.16`) or via **Actions → Release → Run workflow**.
+Windows installers are built by GitHub Actions on version tags (`v0.1.16`) or via **Actions → Release → Run workflow**. Contributors do not need this section to send a PR.
 
 1. Put the updater **private** key in GitHub → Settings → Secrets:
    - `TAURI_SIGNING_PRIVATE_KEY` — full contents of your local `.tauri/chaincord.key` (never commit this file)
