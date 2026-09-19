@@ -2,7 +2,7 @@
 
 Decentralized live chat (**alpha**). Communities, channels, E2EE in the design — the binary is still an MVP.
 
-Architecture notebook: [`docs/architecture.md`](docs/architecture.md). License: [Apache-2.0](LICENSE).
+Architecture notebook: [`docs/architecture.md`](docs/architecture.md). License: [Apache-2.0](LICENSE). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 This is an **alpha** desktop chat. The live channel key still travels in the invite; do not treat it as production E2EE. See [`SECURITY.md`](SECURITY.md).
 
@@ -21,7 +21,7 @@ There is no Chaincord-operated MQTT broker. The creator hosts the hub in the app
 
 ## Development
 
-Needs Node.js, Rust, and (on Windows) WebView2 + Build Tools.
+Needs Node.js, Rust, and (on Windows) WebView2 + Build Tools. Full contributor notes: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ```bash
 npm install

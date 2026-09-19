@@ -8,13 +8,13 @@
     "dev": "tauri dev",
     "dev:ui": "vite --config apps/web/vite.config.ts",
     "build": "vite build --config apps/web/vite.config.ts",
-    "dist": "scripts/tauri-build.cmd",
+    "dist": "tauri build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "scripts/tauri-build.cmd",
+    "tauri:build": "tauri build",
     "test": "vitest run --config apps/web/vite.config.ts",
     "test:watch": "vitest --config apps/web/vite.config.ts",
-    "test:core": "scripts/cargo-test.cmd"
+    "test:core": "cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",

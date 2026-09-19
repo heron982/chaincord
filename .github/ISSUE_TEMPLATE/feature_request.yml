@@ -1,0 +1,33 @@
+name: Feature request
+description: Idea or enhancement for Chaincord
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Large roadmap items (MLS, erasure, full SFU, platform broker) need discussion first — see [CONTRIBUTING.md](https://github.com/heron982/chaincord/blob/master/CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change?
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope guess
+      options:
+        - Small (docs, UI, tests)
+        - Medium (app behavior)
+        - Large (crypto / networking architecture)
+    validations:
+      required: true
