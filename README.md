@@ -1,49 +1,47 @@
 # Chaincord
 
-Live chat descentralizado (MVP). Caderno: [`docs/arquitetura.md`](docs/arquitetura.md).
+Live chat descentralizado (alpha). Comunidades, canais, E2EE no desenho — o binário ainda é MVP.
 
-## Para o tester (sem instalar nada)
+Caderno: [`docs/arquitetura.md`](docs/arquitetura.md). Licença: [Apache-2.0](LICENSE).
 
-Quem **gera** o app (você, com Node + Rust neste repo):
+This is an **alpha** desktop chat. The live channel key still travels in the invite; do not treat it as production E2EE. See [`SECURITY.md`](SECURITY.md).
 
-```bash
-npm install
-npm run dist
-```
+## O que funciona hoje
 
-O executável e o instalador saem em `D:\chaincord\`:
-
-- `D:\chaincord\chaincord.exe` — dois cliques, **janela própria**, sem CMD e sem Chrome
-- `D:\chaincord\Chaincord_0.1.0_x64-setup.exe` — instalador NSIS (opcional)
-
-O tester:
-
-1. Abre `chaincord.exe`
-2. **Criar** comunidade (ou **Entrar** com o convite)
-3. Conversa em `#general`
-
-Dois testers no **mesmo Wi-Fi**: o convite já leva o IP da LAN.
-
-Dois testers em **redes diferentes**: o app abre um caminho pela internet (os dois saem; ninguém precisa abrir porta). Chat e sinal da call passam. A call 1:1 ainda depende de STUN e pode falhar em CGNAT até o coturn.
-
-Duas pessoas no **mesmo PC**: abra o exe duas vezes (a segunda pega outra porta). Copie o convite da primeira.
-
-## Desenvolvimento
-
-```bash
-npm install
-npm run tauri:dev
-```
-
-Nesta máquina o disco C: está cheio, então as ferramentas pesadas ficam no D::
-
-- Visual Studio Build Tools: `D:\Tools\VSBuildTools`
-- crates do Cargo: `D:\cargo-home`
-- build Rust: `D:\cargo-target\chaincord`
-- TEMP: `D:\Temp`
-
-`npm run dist` já usa esses caminhos (`scripts/tauri-build.cmd`).
+- Criar comunidade ou entrar com convite
+- Chat em `#general` na LAN; entre redes se o PC de quem criou for alcançável (o app dele é o relé)
+- Call 1:1 (WebRTC). Em CGNAT pode falhar até haver TURN próprio
+- Dois clientes no mesmo PC: abra o app duas vezes (a segunda pega outra porta)
 
 ## O que ainda não é
 
-Stack alvo: Rust + Tauri 2 (esta janela). MLS, erasure, SFU e TURN da call vêm depois. Chat entre redes já usa relé de saída. A chave ao vivo ainda vai no convite.
+MLS, erasure, SFU de grupo, coturn da comunidade, nó `--node` 24h. A chave ao vivo ainda vai no convite.
+
+Não há broker MQTT do Chaincord. Quem cria hospeda o hub no app; o convite leva o endereço. Sem essa máquina alcançável, só a mesma rede. TURN OpenRelay ainda é fallback da call 1:1. Detalhe em [`SECURITY.md`](SECURITY.md).
+
+## Desenvolvimento
+
+Precisa de Node.js, Rust e (no Windows) WebView2 + Build Tools.
+
+```bash
+npm install
+npm test
+npm run test:core
+npm run tauri:dev
+```
+
+Instalador / exe:
+
+```bash
+npm run dist
+```
+
+Saída padrão do Tauri: `src-tauri/target/release/bundle/` (NSIS + exe). Se existir um disco `D:\` com o layout local de build, os scripts em `scripts/` usam esse disco; caso contrário usam o Cargo/Node do sistema.
+
+## Uso rápido
+
+1. Abre o app
+2. **Criar** comunidade ou **Entrar** com o convite
+3. Conversar em `#general`
+
+Mesmo Wi-Fi: o convite já leva o IP da LAN. Redes diferentes: o app de quem criou é o relé — os dois saem até essa máquina.

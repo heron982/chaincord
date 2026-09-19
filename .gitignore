@@ -10,3 +10,7 @@ data/
 *.db
 .idea/
 .vscode/
+copy-result.txt
+*.exe
+*.msi
+*.nsis

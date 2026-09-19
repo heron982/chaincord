@@ -33,6 +33,12 @@ export function unlockSounds() {
   audio();
 }
 
+export async function setSoundSink(deviceId: string) {
+  const ac = audio();
+  const ctxSink = ac as AudioContext & { setSinkId?: (id: string) => Promise<void> };
+  if (ctxSink?.setSinkId) await ctxSink.setSinkId(deviceId).catch(() => undefined);
+}
+
 export function playCallJoin() {
   tone(587, 0, 0.11, 0.09);
   tone(880, 0.09, 0.16, 0.11);
@@ -41,4 +47,38 @@ export function playCallJoin() {
 export function playCallLeave() {
   tone(659, 0, 0.1, 0.09);
   tone(392, 0.09, 0.18, 0.1);
+}
+
+export async function playOutputTest(deviceId = "") {
+  const ac = audio();
+  if (!ac) return;
+  const ctxSink = ac as AudioContext & { setSinkId?: (id: string) => Promise<void> };
+  if (ctxSink.setSinkId) {
+    await ctxSink.setSinkId(deviceId).catch(() => undefined);
+    tone(880, 0, 0.28, 0.16);
+    tone(1174, 0.2, 0.32, 0.14);
+    return;
+  }
+  const dest = ac.createMediaStreamDestination();
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.type = "sine";
+  osc.frequency.value = 880;
+  const t0 = ac.currentTime;
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(0.16, t0 + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.42);
+  osc.connect(gain);
+  gain.connect(dest);
+  const el = document.createElement("audio");
+  el.autoplay = true;
+  el.srcObject = dest.stream;
+  const sink = el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+  if (sink.setSinkId) await sink.setSinkId(deviceId).catch(() => undefined);
+  await el.play().catch(() => undefined);
+  osc.start(t0);
+  osc.stop(t0 + 0.48);
+  window.setTimeout(() => {
+    el.srcObject = null;
+  }, 700);
 }

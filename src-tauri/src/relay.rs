@@ -1,16 +1,38 @@
 use crate::peer;
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::AppHandle;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{HeaderValue, SEC_WEBSOCKET_PROTOCOL};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
-const DEFAULT_RELAYS: &[&str] = &[
-    "wss://broker.hivemq.com:8884/mqtt",
-    "wss://broker.emqx.io:8084/mqtt",
-];
+struct Hub {
+    next: AtomicU64,
+    clients: Mutex<HashMap<u64, mpsc::UnboundedSender<String>>>,
+}
+
+fn hub() -> &'static Hub {
+    static HUB: OnceLock<Hub> = OnceLock::new();
+    HUB.get_or_init(|| Hub {
+        next: AtomicU64::new(1),
+        clients: Mutex::new(HashMap::new()),
+    })
+}
+
+fn hub_broadcast(except: u64, payload: &str) {
+    let clients = hub().clients.lock().unwrap_or_else(|e| e.into_inner());
+    for (id, tx) in clients.iter() {
+        if *id != except {
+            let _ = tx.send(payload.to_string());
+        }
+    }
+}
 
 pub fn spawn(app: AppHandle) {
     let Some(community_id) = peer::community_id(&app) else {
@@ -20,23 +42,37 @@ pub fn spawn(app: AppHandle) {
         return;
     }
     let gen = peer::bump_relay_gen(&app);
-    let client_id = format!("cc{}", &peer::public_key(&app)[..16.min(peer::public_key(&app).len())]);
-    tauri::async_runtime::spawn(async move {
-        let mut backoff = 2u64;
-        loop {
-            if !peer::relay_is_current(&app, gen) {
-                return;
-            }
-            if run_session(&app, gen, &community_id, &client_id).await.is_ok() {
-                backoff = 2;
-            }
-            if !peer::relay_is_current(&app, gen) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_secs(backoff)).await;
-            backoff = (backoff * 2).min(20);
+    let pk = peer::public_key(&app);
+    let pk16 = pk[..16.min(pk.len())].to_string();
+    for (i, url) in peer::community_relays(&app).into_iter().enumerate() {
+        if peer::is_own_relay_url(&app, &url) {
+            continue;
         }
-    });
+        let app = app.clone();
+        let community_id = community_id.clone();
+        let client_id = format!("cc{pk16}{i}");
+        let slot = i.to_string();
+        tauri::async_runtime::spawn(async move {
+            let mut backoff = 2u64;
+            loop {
+                if !peer::relay_is_current(&app, gen) {
+                    return;
+                }
+                match connect_mqtt(&url, &client_id).await {
+                    Ok(ws) => {
+                        backoff = 2;
+                        let _ = pump(&app, gen, &community_id, &slot, ws).await;
+                    }
+                    Err(_) => {}
+                }
+                if !peer::relay_is_current(&app, gen) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                backoff = (backoff * 2).min(15);
+            }
+        });
+    }
 }
 
 fn relay_disabled() -> bool {
@@ -46,45 +82,214 @@ fn relay_disabled() -> bool {
     )
 }
 
-fn relay_urls() -> Vec<String> {
-    if let Ok(url) = std::env::var("CHAINCORD_RELAY") {
-        if !url.is_empty() && url != "off" && url != "0" && url != "false" {
-            return vec![url];
-        }
+pub fn effective(stored: &[String]) -> Vec<String> {
+    stored
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+pub fn parse_one(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Err("informe um relé ws:// ou wss://".into());
     }
-    DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
+    if url.len() > 255 {
+        return Err("relé muito longo".into());
+    }
+    if url.chars().any(char::is_whitespace) {
+        return Err("relé invalido".into());
+    }
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("wss://") || lower.starts_with("ws://")) {
+        return Err("relé deve ser ws:// ou wss://".into());
+    }
+    let rest = if lower.starts_with("wss://") {
+        &url[6..]
+    } else {
+        &url[5..]
+    };
+    if rest.is_empty() || rest.starts_with('/') {
+        return Err("relé invalido".into());
+    }
+    Ok(url.to_string())
+}
+
+pub fn choose_for_create(custom: Option<&str>) -> Result<Vec<String>, String> {
+    if let Some(raw) = custom.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(vec![parse_one(raw)?]);
+    }
+    match std::env::var("CHAINCORD_RELAY") {
+        Ok(url) if relay_off(&url) => Ok(Vec::new()),
+        Ok(url) if !url.trim().is_empty() => Ok(vec![parse_one(&url)?]),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn relay_off(value: &str) -> bool {
+    matches!(value.trim(), "off" | "0" | "false")
 }
 
 fn topic(community_id: &str) -> String {
     format!("cc/v1/{community_id}")
 }
 
-async fn run_session(
-    app: &AppHandle,
-    gen: u64,
-    community_id: &str,
-    client_id: &str,
-) -> Result<(), String> {
-    let mut last_err = "nenhum relé".to_string();
-    for url in relay_urls() {
-        if !peer::relay_is_current(app, gen) {
-            return Ok(());
+fn mqtt_connack() -> Vec<u8> {
+    vec![0x20, 0x02, 0x00, 0x00]
+}
+
+fn mqtt_pingresp() -> Vec<u8> {
+    vec![0xD0, 0x00]
+}
+
+fn mqtt_suback(id: u16) -> Vec<u8> {
+    let mut payload = id.to_be_bytes().to_vec();
+    payload.push(1);
+    packet(0x90, &payload)
+}
+
+fn mqtt_kind(packet: &[u8]) -> u8 {
+    packet.first().copied().unwrap_or(0) & 0xF0
+}
+
+fn mqtt_fixed_header_len(packet: &[u8]) -> Option<usize> {
+    if packet.is_empty() {
+        return None;
+    }
+    let mut idx = 1usize;
+    loop {
+        if idx >= packet.len() {
+            return None;
         }
-        match connect_mqtt(&url, client_id, &topic(community_id), &peer::goodbye_json(app)).await {
-            Ok(ws) => {
-                return pump(app, gen, community_id, ws).await;
-            }
-            Err(err) => last_err = format!("{url}: {err}"),
+        let byte = packet[idx];
+        idx += 1;
+        if byte & 0x80 == 0 {
+            return Some(idx);
+        }
+        if idx > 5 {
+            return None;
         }
     }
-    Err(last_err)
+}
+
+fn mqtt_subscribe_id(packet: &[u8]) -> Option<u16> {
+    if mqtt_kind(packet) != 0x80 {
+        return None;
+    }
+    let idx = mqtt_fixed_header_len(packet)?;
+    if idx + 2 > packet.len() {
+        return None;
+    }
+    Some(u16::from_be_bytes([packet[idx], packet[idx + 1]]))
+}
+
+pub async fn serve_hub<S>(app: AppHandle, mut ws: WebSocketStream<S>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(community_id) = peer::community_id(&app) else {
+        let _ = ws.close(None).await;
+        return;
+    };
+    let topic = topic(&community_id);
+    let id = hub().next.fetch_add(1, Ordering::SeqCst);
+    let slot = format!("hub{id}");
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    {
+        let mut clients = hub().clients.lock().unwrap_or_else(|e| e.into_inner());
+        clients.insert(id, tx.clone());
+    }
+    let gen = peer::current_relay_gen(&app);
+    peer::register_relay(&app, &slot, tx);
+
+    let mut buf = Vec::new();
+    let mut pkt_id: u16 = 1;
+
+    loop {
+        if peer::community_id(&app).as_deref() != Some(community_id.as_str()) {
+            break;
+        }
+        tokio::select! {
+            outgoing = rx.recv() => {
+                let Some(text) = outgoing else { break; };
+                let payload = compact_wire(&text);
+                if payload.len() > 48_000 {
+                    continue;
+                }
+                pkt_id = next_mqtt_id(pkt_id);
+                if ws
+                    .send(Message::Binary(
+                        mqtt_publish(&topic, payload.as_bytes(), pkt_id).into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            incoming = ws.next() => {
+                let Some(Ok(msg)) = incoming else { break; };
+                let Ok(bytes) = ws_bytes(msg) else { continue; };
+                buf.extend_from_slice(&bytes);
+                let mut stop = false;
+                while let Some(packet) = take_packet(&mut buf) {
+                    match mqtt_kind(&packet) {
+                        0x10 => {
+                            if ws.send(Message::Binary(mqtt_connack().into())).await.is_err() {
+                                stop = true;
+                                break;
+                            }
+                        }
+                        0x80 => {
+                            if let Some(sid) = mqtt_subscribe_id(&packet) {
+                                if ws.send(Message::Binary(mqtt_suback(sid).into())).await.is_err()
+                                {
+                                    stop = true;
+                                    break;
+                                }
+                            }
+                        }
+                        0x30 => {
+                            if let Some(pid) = mqtt_publish_id(&packet) {
+                                let _ = ws.send(Message::Binary(mqtt_puback(pid).into())).await;
+                            }
+                            if let Some(payload) = mqtt_publish_payload(&packet) {
+                                if let Ok(text) = String::from_utf8(payload) {
+                                    hub_broadcast(id, &text);
+                                    peer::ingest_from_relay(&app, &text);
+                                }
+                            }
+                        }
+                        0xC0 => {
+                            let _ = ws.send(Message::Binary(mqtt_pingresp().into())).await;
+                        }
+                        0xE0 => {
+                            stop = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if stop {
+                    break;
+                }
+            }
+        }
+    }
+
+    hub()
+        .clients
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
+    peer::unregister_relay(&app, gen, &slot);
+    let _ = ws.close(None).await;
 }
 
 async fn connect_mqtt(
     url: &str,
     client_id: &str,
-    will_topic: &str,
-    will_payload: &str,
 ) -> Result<
     tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -102,9 +307,7 @@ async fn connect_mqtt(
         .await
         .map_err(|_| "tempo esgotado".to_string())?
         .map_err(|e| e.to_string())?;
-    ws.send(Message::Binary(
-        mqtt_connect(client_id, will_topic, will_payload.as_bytes()).into(),
-    ))
+    ws.send(Message::Binary(mqtt_connect(client_id).into()))
         .await
         .map_err(|e| e.to_string())?;
     let connack = tokio::time::timeout(Duration::from_secs(8), ws.next())
@@ -123,6 +326,7 @@ async fn pump(
     app: &AppHandle,
     gen: u64,
     community_id: &str,
+    slot: &str,
     mut ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
@@ -134,7 +338,7 @@ async fn pump(
     let mut buf = wait_suback(&mut ws).await?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    peer::register_relay(app, tx);
+    peer::register_relay(app, slot, tx);
     let acks = drain_mqtt_publishes(app, &mut buf);
     for id in acks {
         let _ = ws.send(Message::Binary(mqtt_puback(id).into())).await;
@@ -154,18 +358,17 @@ async fn pump(
     }
     peer::emit_state(app);
 
-    let mut ping = tokio::time::interval(Duration::from_secs(30));
+    let mut ping = tokio::time::interval(Duration::from_secs(20));
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut replay = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_millis(800),
-        Duration::from_secs(2),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        Duration::from_secs(10),
     );
     replay.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut replays_left = 1u8;
 
     loop {
         if !peer::relay_is_current(app, gen) {
-            peer::unregister_relay(app);
+            peer::unregister_relay(app, gen, slot);
             let _ = ws.close(None).await;
             return Ok(());
         }
@@ -175,8 +378,7 @@ async fn pump(
                     break;
                 }
             }
-            _ = replay.tick(), if replays_left > 0 => {
-                replays_left -= 1;
+            _ = replay.tick() => {
                 for msg in peer::handshake_messages(app, true) {
                     let payload = compact_wire(&msg);
                     if payload.len() > 48_000 {
@@ -228,7 +430,7 @@ async fn pump(
             }
         }
     }
-    peer::unregister_relay(app);
+    peer::unregister_relay(app, gen, slot);
     Err("relé desconectou".into())
 }
 
@@ -343,15 +545,12 @@ fn packet(header: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-fn mqtt_connect(client_id: &str, will_topic: &str, will_payload: &[u8]) -> Vec<u8> {
+fn mqtt_connect(client_id: &str) -> Vec<u8> {
     let mut payload = mqtt_str("MQTT");
     payload.push(4);
-    payload.push(0x0E);
+    payload.push(0x02);
     payload.extend_from_slice(&60u16.to_be_bytes());
     payload.extend(mqtt_str(client_id));
-    payload.extend(mqtt_str(will_topic));
-    payload.extend_from_slice(&(will_payload.len() as u16).to_be_bytes());
-    payload.extend_from_slice(will_payload);
     packet(0x10, &payload)
 }
 
@@ -515,6 +714,9 @@ mod tests {
         assert_eq!(mqtt_puback(7)[0], 0x40);
         assert_eq!(next_mqtt_id(u16::MAX), 1);
         assert_eq!(next_mqtt_id(7), 8);
+        let sub = mqtt_subscribe("cc/v1/abc", 9);
+        assert_eq!(mqtt_subscribe_id(&sub), Some(9));
+        assert_eq!(mqtt_connack(), vec![0x20, 0x02, 0x00, 0x00]);
     }
 
     #[test]
@@ -534,9 +736,8 @@ mod tests {
     }
 
     #[test]
-    fn mqtt_connect_sets_last_will() {
-        let will = br#"{"type":"presence","status":"offline"}"#;
-        let packet = mqtt_connect("ccabc", "cc/v1/room", will);
+    fn mqtt_connect_is_clean_session_without_will() {
+        let packet = mqtt_connect("ccabc");
         assert_eq!(packet[0], 0x10);
         let mut idx = 1usize;
         loop {
@@ -550,17 +751,39 @@ mod tests {
         idx += 2 + proto_len;
         idx += 1;
         let flags = packet[idx];
-        assert_eq!(flags & 0x04, 0x04);
-        assert_eq!((flags & 0x18) >> 3, 1);
+        assert_eq!(flags, 0x02);
         idx += 1 + 2;
         let id_len = u16::from_be_bytes([packet[idx], packet[idx + 1]]) as usize;
         idx += 2 + id_len;
-        let topic_len = u16::from_be_bytes([packet[idx], packet[idx + 1]]) as usize;
-        idx += 2;
-        assert_eq!(&packet[idx..idx + topic_len], b"cc/v1/room");
-        idx += topic_len;
-        let will_len = u16::from_be_bytes([packet[idx], packet[idx + 1]]) as usize;
-        idx += 2;
-        assert_eq!(&packet[idx..idx + will_len], will);
+        assert_eq!(idx, packet.len());
+    }
+
+    #[test]
+    fn parse_one_accepts_websocket_urls() {
+        assert_eq!(
+            parse_one("  wss://broker.example/mqtt ").unwrap(),
+            "wss://broker.example/mqtt"
+        );
+        assert!(parse_one("http://broker.example/mqtt").is_err());
+        assert!(parse_one("wss://").is_err());
+        assert!(parse_one("").is_err());
+    }
+
+    #[test]
+    fn empty_stored_relays_mean_no_broker() {
+        assert!(effective(&[]).is_empty());
+        assert_eq!(
+            effective(&["wss://mine.example/mqtt".into()]),
+            vec!["wss://mine.example/mqtt".to_string()]
+        );
+    }
+
+    #[test]
+    fn choose_for_create_keeps_custom_relay() {
+        assert_eq!(
+            choose_for_create(Some("wss://mine.example/mqtt")).unwrap(),
+            vec!["wss://mine.example/mqtt".to_string()]
+        );
+        assert!(choose_for_create(Some("ftp://x")).is_err());
     }
 }

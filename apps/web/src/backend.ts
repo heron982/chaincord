@@ -1,12 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+export type UiCommunity = {
+  id: string;
+  name: string;
+};
+
 export type UiState = {
   publicKey: string;
   displayName: string;
   avatar: string;
   communityName: string;
   communityId: string;
+  communities: UiCommunity[];
   invite: string;
   listenUrl: string;
   peers: string[];
@@ -14,12 +20,23 @@ export type UiState = {
   callRooms: string[];
   voice: Record<string, string[]>;
   profiles: Record<string, PeerProfile>;
+  ownerKey: string;
   archiveBytes: number;
   archiveMessages: number;
   seedSent: number;
   seedTotal: number;
   seedActive: boolean;
   seeding: string[];
+  liveCall: UiLiveCall | null;
+};
+
+export type UiLiveCall = {
+  communityId: string;
+  communityName: string;
+  ownerKey: string;
+  room: string;
+  voice: Record<string, string[]>;
+  profiles: Record<string, PeerProfile>;
 };
 
 export type PeerProfile = {
@@ -28,6 +45,7 @@ export type PeerProfile = {
   muted: boolean;
   deafened: boolean;
   status?: string;
+  sharingScreen?: boolean;
 };
 
 export type UiMessage = {
@@ -36,6 +54,7 @@ export type UiMessage = {
   ts: number;
   channel: string;
   self: boolean;
+  communityId?: string;
 };
 
 export async function backendGetState(): Promise<UiState> {
@@ -48,6 +67,10 @@ export async function backendCreate(name: string): Promise<void> {
 
 export async function backendJoin(invite: string): Promise<void> {
   await invoke("join_community", { invite });
+}
+
+export async function backendSwitchCommunity(id: string): Promise<void> {
+  await invoke("switch_community", { id });
 }
 
 export async function backendChat(text: string, channel: string): Promise<void> {
@@ -78,12 +101,23 @@ export async function backendPresence(
   muted: boolean,
   deafened: boolean,
   status?: string,
+  sharingScreen?: boolean,
 ): Promise<void> {
-  await invoke("publish_presence", { muted, deafened, status });
+  await invoke("publish_presence", { muted, deafened, status, sharingScreen });
 }
 
 export async function backendHistory(): Promise<UiMessage[]> {
   return invoke<UiMessage[]>("get_history");
+}
+
+export async function backendAppendLog(line: {
+  t: number;
+  mode: string;
+  peer: string | null;
+  event: string;
+  level: string;
+}): Promise<void> {
+  await invoke("append_call_log", { line });
 }
 
 export type RtcFrame = {
@@ -94,6 +128,7 @@ export type RtcFrame = {
   kind: "offer" | "answer" | "ice" | "bye";
   sdp?: string;
   candidate?: RTCIceCandidateInit | null;
+  ts?: number;
 };
 
 export async function backendSendRtc(frame: RtcFrame): Promise<void> {
@@ -112,8 +147,8 @@ export async function backendRtcStop(): Promise<void> {
   await invoke("rtc_stop");
 }
 
-export async function backendRtcSync(peers: string[]): Promise<void> {
-  await invoke("rtc_sync", { peers });
+export async function backendRtcSync(peers: string[], hub?: string | null): Promise<void> {
+  await invoke("rtc_sync", { peers, hub: hub ?? null });
 }
 
 export async function backendRtcSignal(frame: RtcFrame): Promise<void> {

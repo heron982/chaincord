@@ -14,6 +14,11 @@ description = "Entrar com convite"
 commands.allow = ["join_community"]
 
 [[permission]]
+identifier = "allow-switch-community"
+description = "Alternar comunidade ativa"
+commands.allow = ["switch_community"]
+
+[[permission]]
 identifier = "allow-send-chat"
 description = "Enviar mensagem ao vivo"
 commands.allow = ["send_chat"]
@@ -82,3 +87,8 @@ commands.allow = ["publish_presence"]
 identifier = "allow-get-history"
 description = "Ler historico local do chat"
 commands.allow = ["get_history"]
+
+[[permission]]
+identifier = "allow-append-call-log"
+description = "Gravar log da call em arquivo"
+commands.allow = ["append_call_log"]

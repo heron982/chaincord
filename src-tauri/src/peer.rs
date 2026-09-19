@@ -8,14 +8,34 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener as StdTcpListener};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use crate::store::Store;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::http::header::{HeaderValue, SEC_WEBSOCKET_PROTOCOL};
+use tokio_tungstenite::{accept_hdr_async, connect_async, tungstenite::Message, WebSocketStream};
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCommunity {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiLiveCall {
+    pub community_id: String,
+    pub community_name: String,
+    pub owner_key: String,
+    pub room: String,
+    pub voice: HashMap<String, Vec<String>>,
+    pub profiles: HashMap<String, PeerProfile>,
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +45,7 @@ pub struct UiState {
     pub avatar: String,
     pub community_name: String,
     pub community_id: String,
+    pub communities: Vec<UiCommunity>,
     pub invite: String,
     pub listen_url: String,
     pub peers: Vec<String>,
@@ -32,12 +53,14 @@ pub struct UiState {
     pub call_rooms: Vec<String>,
     pub voice: HashMap<String, Vec<String>>,
     pub profiles: HashMap<String, PeerProfile>,
+    pub owner_key: String,
     pub archive_bytes: u64,
     pub archive_messages: u32,
     pub seed_sent: u64,
     pub seed_total: u64,
     pub seed_active: bool,
     pub seeding: Vec<String>,
+    pub live_call: Option<UiLiveCall>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,6 +72,8 @@ pub struct PeerProfile {
     pub deafened: bool,
     #[serde(default = "offline_status")]
     pub status: String,
+    #[serde(default)]
+    pub sharing_screen: bool,
 }
 
 impl Default for PeerProfile {
@@ -59,6 +84,7 @@ impl Default for PeerProfile {
             muted: false,
             deafened: false,
             status: offline_status(),
+            sharing_screen: false,
         }
     }
 }
@@ -68,6 +94,8 @@ fn offline_status() -> String {
 }
 
 const PRESENCE_TTL_MS: i64 = 90_000;
+const VOICE_JOIN_GRACE_MS: i64 = 8_000;
+const VOICE_LEAVE_HOLD_MS: i64 = 30 * 60 * 1000;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct UiMessage {
@@ -77,6 +105,8 @@ pub struct UiMessage {
     pub channel: String,
     #[serde(rename = "self")]
     pub is_self: bool,
+    #[serde(default, rename = "communityId")]
+    pub community_id: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -92,7 +122,9 @@ struct Inner {
     display_name: String,
     avatar: String,
     community: Option<crate::crypto::Community>,
+    viewed_id: Option<String>,
     invite_peers: Vec<String>,
+    relays: Vec<String>,
     listen_url: String,
     listen_urls: Vec<String>,
     listen_port: u16,
@@ -100,9 +132,12 @@ struct Inner {
     text_channels: Vec<String>,
     call_rooms: Vec<String>,
     voice: HashMap<String, HashSet<String>>,
+    voice_left: HashMap<String, i64>,
+    voice_joined: HashMap<String, i64>,
     profiles: HashMap<String, PeerProfile>,
     muted: bool,
     deafened: bool,
+    sharing_screen: bool,
     status: String,
     last_seen: HashMap<String, i64>,
     archive_messages: u32,
@@ -118,7 +153,9 @@ pub struct AppState {
     store: Mutex<Option<Store>>,
     pending: AtomicU64,
     relay_gen: AtomicU64,
+    link_gen: AtomicU64,
     seen: Mutex<(HashSet<u64>, VecDeque<u64>)>,
+    outbox: Mutex<VecDeque<String>>,
     #[cfg(target_os = "linux")]
     pub rtc: std::sync::Arc<crate::rtc::RtcHub>,
 }
@@ -131,7 +168,9 @@ impl AppState {
                 display_name: String::new(),
                 avatar: String::new(),
                 community: None,
+                viewed_id: None,
                 invite_peers: Vec::new(),
+                relays: Vec::new(),
                 listen_url: String::new(),
                 listen_urls: Vec::new(),
                 listen_port: 0,
@@ -139,9 +178,12 @@ impl AppState {
                 text_channels: Vec::new(),
                 call_rooms: Vec::new(),
                 voice: HashMap::new(),
+                voice_left: HashMap::new(),
+                voice_joined: HashMap::new(),
                 profiles: HashMap::new(),
                 muted: false,
                 deafened: false,
+                sharing_screen: false,
                 status: "online".into(),
                 last_seen: HashMap::new(),
                 archive_messages: 0,
@@ -154,7 +196,9 @@ impl AppState {
             store: Mutex::new(None),
             pending: AtomicU64::new(1),
             relay_gen: AtomicU64::new(0),
+            link_gen: AtomicU64::new(0),
             seen: Mutex::new((HashSet::new(), VecDeque::new())),
+            outbox: Mutex::new(VecDeque::new()),
             #[cfg(target_os = "linux")]
             rtc: std::sync::Arc::new(crate::rtc::RtcHub::new()),
         }
@@ -162,21 +206,96 @@ impl AppState {
 
     pub fn snapshot(&self) -> UiState {
         let inner = self.inner.lock().expect("state");
+        let live_id = inner.community.as_ref().map(|c| c.id.clone()).unwrap_or_default();
+        let viewed_id = viewed_community_id(&inner).unwrap_or_default();
+        let overlay = if !viewed_id.is_empty() && viewed_id != live_id {
+            let guard = self.store.lock().expect("store");
+            guard.as_ref().and_then(|store| store.load_session(&viewed_id))
+        } else {
+            None
+        };
+        let live_call = snapshot_live_call(&inner);
+        let live_peers: Vec<String> = if overlay.is_some() {
+            Vec::new()
+        } else {
+            self.remotes
+                .lock()
+                .expect("remotes")
+                .keys()
+                .filter(|k| is_direct_remote_key(k))
+                .cloned()
+                .collect()
+        };
+        let communities = {
+            let guard = self.store.lock().expect("store");
+            guard
+                .as_ref()
+                .map(|store| {
+                    let mut list = store.list_communities();
+                    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    list.into_iter()
+                        .map(|c| UiCommunity {
+                            id: c.id,
+                            name: c.name,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        if let Some(session) = overlay {
+            let (archive_messages, archive_bytes) = {
+                let guard = self.store.lock().expect("store");
+                let msgs = guard
+                    .as_ref()
+                    .map(|store| store.load_messages(&session.community.id))
+                    .unwrap_or_default();
+                let bytes = msgs
+                    .iter()
+                    .map(|m| (m.text.len() + m.sender.len() + m.channel.len() + 24) as u64)
+                    .sum();
+                (msgs.len() as u32, bytes)
+            };
+            let invite = encode_invite(&Invite::new(
+                session.community.clone(),
+                session.invite_peers.clone(),
+                session.relays.clone(),
+            ));
+            let mut profiles = session.profiles.clone();
+            for profile in profiles.values_mut() {
+                profile.status = "offline".into();
+                profile.sharing_screen = false;
+            }
+            return UiState {
+                public_key: inner.identity.public_hex(),
+                display_name: inner.display_name.clone(),
+                avatar: inner.avatar.clone(),
+                community_name: session.community.genesis.name.clone(),
+                community_id: session.community.id.clone(),
+                communities,
+                invite,
+                listen_url: inner.listen_url.clone(),
+                peers: live_peers,
+                text_channels: session.text_channels.clone(),
+                call_rooms: session.call_rooms.clone(),
+                voice: HashMap::new(),
+                profiles,
+                owner_key: session.community.genesis.owner.clone(),
+                archive_bytes,
+                archive_messages,
+                seed_sent: 1,
+                seed_total: 1,
+                seed_active: false,
+                seeding: Vec::new(),
+                live_call,
+            };
+        }
         let invite = inner.community.as_ref().map(|c| {
-            encode_invite(&Invite {
-                v: 1,
-                community: c.clone(),
-                peers: invite_peer_list(&inner),
-            })
+            encode_invite(&Invite::new(
+                c.clone(),
+                invite_peer_list(&inner),
+                inner.relays.clone(),
+            ))
         });
-        let live_peers: Vec<String> = self
-            .remotes
-            .lock()
-            .expect("remotes")
-            .keys()
-            .filter(|k| !k.starts_with("pending:"))
-            .cloned()
-            .collect();
         let seed = seed_progress(&inner);
         UiState {
             public_key: inner.identity.public_hex(),
@@ -187,30 +306,27 @@ impl AppState {
                 .as_ref()
                 .map(|c| c.genesis.name.clone())
                 .unwrap_or_default(),
-            community_id: inner
-                .community
-                .as_ref()
-                .map(|c| c.id.clone())
-                .unwrap_or_default(),
+            community_id: live_id,
+            communities,
             invite: invite.unwrap_or_default(),
             listen_url: inner.listen_url.clone(),
             peers: live_peers,
             text_channels: inner.text_channels.clone(),
             call_rooms: inner.call_rooms.clone(),
-            voice: inner
-                .voice
-                .iter()
-                .map(|(room, people)| {
-                    (room.clone(), people.iter().cloned().collect::<Vec<_>>())
-                })
-                .collect(),
+            voice: snapshot_voice(&inner),
             profiles: snapshot_profiles(&inner),
+            owner_key: inner
+                .community
+                .as_ref()
+                .map(|c| c.genesis.owner.clone())
+                .unwrap_or_default(),
             archive_bytes: inner.archive_bytes,
             archive_messages: inner.archive_messages,
             seed_sent: seed.0,
             seed_total: seed.1,
             seed_active: seeding_visible(&inner),
             seeding: inner.seeding.iter().cloned().collect(),
+            live_call,
         }
     }
 
@@ -243,32 +359,150 @@ pub(crate) fn community_id(app: &AppHandle) -> Option<String> {
         .map(|c| c.id.clone())
 }
 
+pub(crate) fn community_relays(app: &AppHandle) -> Vec<String> {
+    let state = state_of(app);
+    let inner = state.inner.lock().expect("state");
+    crate::relay::effective(&inner.relays)
+}
+
+fn viewed_community_id(inner: &Inner) -> Option<String> {
+    inner
+        .viewed_id
+        .as_ref()
+        .filter(|id| !id.is_empty())
+        .cloned()
+        .or_else(|| inner.community.as_ref().map(|c| c.id.clone()))
+}
+
+fn seated_in_call(inner: &Inner) -> bool {
+    let me = inner.identity.public_hex();
+    inner.voice.values().any(|people| people.contains(&me))
+}
+
+fn snapshot_voice(inner: &Inner) -> HashMap<String, Vec<String>> {
+    let mut rooms: Vec<_> = inner.voice.iter().collect();
+    rooms.sort_by(|a, b| a.0.cmp(b.0));
+    rooms
+        .into_iter()
+        .map(|(room, people)| {
+            let mut list: Vec<String> = people.iter().cloned().collect();
+            list.sort();
+            (room.clone(), list)
+        })
+        .collect()
+}
+
+fn snapshot_live_call(inner: &Inner) -> Option<UiLiveCall> {
+    let community = inner.community.as_ref()?;
+    let me = inner.identity.public_hex();
+    let room = inner
+        .voice
+        .iter()
+        .find(|(_, people)| people.contains(&me))
+        .map(|(room, _)| room.clone())?;
+    Some(UiLiveCall {
+        community_id: community.id.clone(),
+        community_name: community.genesis.name.clone(),
+        owner_key: community.genesis.owner.clone(),
+        room,
+        voice: snapshot_voice(inner),
+        profiles: snapshot_profiles(inner),
+    })
+}
+
+fn frame_matches_community(frame: &serde_json::Value, community_id: &str) -> bool {
+    match frame
+        .get("communityId")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => id == community_id,
+        None => true,
+    }
+}
+
+fn stamp_community(state: &AppState, json: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    let existing = value
+        .get("communityId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !existing.is_empty() {
+        return json.to_string();
+    }
+    let id = state
+        .inner
+        .lock()
+        .expect("state")
+        .community
+        .as_ref()
+        .map(|c| c.id.clone());
+    let Some(id) = id else {
+        return json.to_string();
+    };
+    value["communityId"] = serde_json::Value::String(id);
+    value.to_string()
+}
+
 pub(crate) fn public_key(app: &AppHandle) -> String {
     state_of(app).inner.lock().expect("state").identity.public_hex()
+}
+
+pub(crate) fn current_relay_gen(app: &AppHandle) -> u64 {
+    state_of(app).relay_gen.load(Ordering::SeqCst)
 }
 
 pub(crate) fn bump_relay_gen(app: &AppHandle) -> u64 {
     state_of(app).relay_gen.fetch_add(1, Ordering::SeqCst) + 1
 }
 
+pub(crate) fn is_own_relay_url(app: &AppHandle, url: &str) -> bool {
+    let state = state_of(app);
+    let inner = state.inner.lock().expect("state");
+    is_self_url(&inner, url)
+}
+
+fn uses_local_hub(inner: &Inner) -> bool {
+    inner.relays.is_empty() || inner.relays.iter().all(|url| is_self_url(inner, url))
+}
+
+fn refresh_owner_hub(inner: &mut Inner) {
+    let Some(community) = inner.community.as_ref() else {
+        return;
+    };
+    if community.genesis.owner != inner.identity.public_hex() {
+        return;
+    }
+    if !uses_local_hub(inner) {
+        return;
+    }
+    inner.relays = invite_peer_list(inner);
+}
+
 pub(crate) fn relay_is_current(app: &AppHandle, gen: u64) -> bool {
     state_of(app).relay_gen.load(Ordering::SeqCst) == gen
 }
 
-pub(crate) fn register_relay(app: &AppHandle, tx: mpsc::UnboundedSender<String>) {
+pub(crate) fn register_relay(app: &AppHandle, slot: &str, tx: mpsc::UnboundedSender<String>) {
     state_of(app)
         .remotes
         .lock()
         .expect("remotes")
-        .insert("relay".into(), tx);
+        .insert(format!("relay:{slot}"), tx);
+    flush_outbox(&state_of(app));
 }
 
-pub(crate) fn unregister_relay(app: &AppHandle) {
+pub(crate) fn unregister_relay(app: &AppHandle, gen: u64, slot: &str) {
+    if !relay_is_current(app, gen) {
+        return;
+    }
     state_of(app)
         .remotes
         .lock()
         .expect("remotes")
-        .remove("relay");
+        .remove(&format!("relay:{slot}"));
 }
 
 pub(crate) fn ingest_from_relay(app: &AppHandle, raw: &str) {
@@ -277,11 +511,9 @@ pub(crate) fn ingest_from_relay(app: &AppHandle, raw: &str) {
         let remotes = state.remotes.lock().expect("remotes");
         remotes.get("relay").cloned()
     };
-    let Some(tx) = tx else {
-        return;
-    };
+    let tx = tx.unwrap_or_else(|| mpsc::unbounded_channel().0);
     let mut from = Some("relay".into());
-    handle_remote(app, raw, &mut from, &tx);
+    handle_remote(app, raw, &mut from, &tx, state.link_gen.load(Ordering::SeqCst));
 }
 
 pub(crate) fn add_listen_url(app: &AppHandle, url: String) {
@@ -295,8 +527,15 @@ pub(crate) fn add_listen_url(app: &AppHandle, url: String) {
             return;
         }
         inner.listen_urls.push(url);
+        refresh_owner_hub(&mut inner);
     }
     emit_state(app);
+    persist_session(app);
+    let state = state_of(app);
+    if let Some((hello, peers)) = hello_and_peers_json(&state, true) {
+        fanout(&state, &hello, None);
+        fanout(&state, &peers, None);
+    }
 }
 
 fn already_seen(app: &AppHandle, raw: &str) -> bool {
@@ -348,6 +587,7 @@ fn persist_session(app: &AppHandle) {
         crate::store::Session {
             community,
             invite_peers: inner.invite_peers.clone(),
+            relays: inner.relays.clone(),
             known_peer_urls: inner.known_peer_urls.clone(),
             text_channels: inner.text_channels.clone(),
             call_rooms: inner.call_rooms.clone(),
@@ -362,13 +602,17 @@ fn persist_session(app: &AppHandle) {
 
 fn persist_message(app: &AppHandle, msg: &UiMessage) {
     let state = state_of(app);
-    let id = state
-        .inner
-        .lock()
-        .expect("state")
-        .community
-        .as_ref()
-        .map(|c| c.id.clone());
+    let id = if !msg.community_id.is_empty() {
+        Some(msg.community_id.clone())
+    } else {
+        state
+            .inner
+            .lock()
+            .expect("state")
+            .community
+            .as_ref()
+            .map(|c| c.id.clone())
+    };
     let Some(id) = id else {
         return;
     };
@@ -378,7 +622,10 @@ fn persist_message(app: &AppHandle, msg: &UiMessage) {
     }
 }
 
-fn emit_and_store_message(app: &AppHandle, msg: UiMessage) {
+fn emit_and_store_message(app: &AppHandle, mut msg: UiMessage) {
+    if msg.community_id.is_empty() {
+        msg.community_id = community_id(app).unwrap_or_default();
+    }
     persist_message(app, &msg);
     refresh_archive(app);
     {
@@ -403,7 +650,27 @@ fn emit_and_store_message(app: &AppHandle, msg: UiMessage) {
 }
 
 fn refresh_archive(app: &AppHandle) {
-    let msgs = get_history(app);
+    let state = state_of(app);
+    let id = state
+        .inner
+        .lock()
+        .expect("state")
+        .community
+        .as_ref()
+        .map(|c| c.id.clone());
+    let Some(id) = id else {
+        let mut inner = state.inner.lock().expect("state");
+        inner.archive_messages = 0;
+        inner.archive_bytes = 0;
+        return;
+    };
+    let msgs = {
+        let guard = state.store.lock().expect("store");
+        guard
+            .as_ref()
+            .map(|store| store.load_messages(&id))
+            .unwrap_or_default()
+    };
     let bytes = msgs
         .iter()
         .map(|m| (m.text.len() + m.sender.len() + m.channel.len() + 24) as u64)
@@ -477,7 +744,7 @@ fn history_payload(state: &AppState) -> (u32, u64, Option<String>) {
     (
         count,
         bytes,
-        Some(serde_json::json!({ "type": "history", "messages": wire }).to_string()),
+        Some(serde_json::json!({ "type": "history", "communityId": id, "messages": wire }).to_string()),
     )
 }
 
@@ -500,6 +767,12 @@ fn maybe_seed_peer(app: &AppHandle, pk: &str, their_count: u32) {
             emit_state(app);
             return;
         }
+        if inner.seeded.get(pk).copied().unwrap_or(0) >= count {
+            inner.seeding.remove(pk);
+            drop(inner);
+            emit_state(app);
+            return;
+        }
         inner.seeding.insert(pk.to_string());
     }
     emit_state(app);
@@ -514,23 +787,84 @@ fn maybe_seed_peer(app: &AppHandle, pk: &str, their_count: u32) {
     emit_state(app);
 }
 
-fn clear_stored_session(app: &AppHandle) {
+fn clear_stored_community(app: &AppHandle, community_id: &str) {
     let state = state_of(app);
     let guard = state.store.lock().expect("store");
     if let Some(store) = guard.as_ref() {
-        let _ = store.clear_session();
+        let _ = store.delete_session(community_id);
     }
+}
+
+fn apply_session(inner: &mut Inner, session: crate::store::Session) {
+    inner.community = Some(session.community);
+    inner.viewed_id = None;
+    inner.invite_peers = session.invite_peers;
+    inner.relays = session.relays;
+    inner.known_peer_urls = session.known_peer_urls;
+    inner.text_channels = session.text_channels;
+    inner.call_rooms = session.call_rooms;
+    inner.profiles = session.profiles;
+    for profile in inner.profiles.values_mut() {
+        profile.status = "offline".into();
+    }
+    inner.voice.clear();
+    inner.voice_left.clear();
+    inner.voice_joined.clear();
+    inner.last_seen.clear();
+    inner.seeded.clear();
+    inner.seeding.clear();
+    inner.archive_messages = 0;
+    inner.archive_bytes = 0;
+    if inner.text_channels.is_empty() {
+        inner.text_channels.push("general".into());
+    }
+}
+
+fn unload_community(inner: &mut Inner) {
+    inner.community = None;
+    inner.viewed_id = None;
+    inner.invite_peers.clear();
+    inner.relays.clear();
+    inner.known_peer_urls.clear();
+    reset_rooms(inner);
+    inner.text_channels.clear();
+    inner.profiles.clear();
+    inner.last_seen.clear();
+    inner.voice_left.clear();
+    inner.voice_joined.clear();
+    inner.seeded.clear();
+    inner.seeding.clear();
+    inner.archive_messages = 0;
+    inner.archive_bytes = 0;
+    inner.voice.clear();
+}
+
+fn activate_loaded(app: &AppHandle, session: crate::store::Session, dial_peers: bool) {
+    let peers = session.invite_peers.clone();
+    let known: Vec<String> = session.known_peer_urls.iter().cloned().collect();
+    let state = state_of(app);
+    {
+        let mut inner = state.inner.lock().expect("state");
+        apply_session(&mut inner, session);
+    }
+    bump_links(&state);
+    persist_session(app);
+    refresh_archive(app);
+    emit_state(app);
+    if dial_peers {
+        let urls = unique_urls(peers.into_iter().chain(known));
+        connect_inviter(app.clone(), urls);
+    }
+    crate::relay::spawn(app.clone());
+    nudge_community_sync(app.clone());
 }
 
 pub fn get_history(app: &AppHandle) -> Vec<UiMessage> {
     let state = state_of(app);
-    let id = state
-        .inner
-        .lock()
-        .expect("state")
-        .community
-        .as_ref()
-        .map(|c| c.id.clone());
+    let id = {
+        let inner = state.inner.lock().expect("state");
+        viewed_community_id(&inner)
+    };
     let Some(id) = id else {
         return Vec::new();
     };
@@ -550,7 +884,7 @@ pub fn boot(app: &AppHandle) {
         return;
     };
     let sqlite_profile = store.load_profile();
-    let session = store.load_session();
+    let session = store.load_active_session();
     *state_of(app).store.lock().expect("store") = Some(store);
 
     if let Some((secret, name, avatar)) = sqlite_profile {
@@ -568,22 +902,27 @@ pub fn boot(app: &AppHandle) {
 
     if let Some(session) = session {
         let state = state_of(app);
-        let mut inner = state.inner.lock().expect("state");
-        inner.community = Some(session.community);
-        inner.invite_peers = session.invite_peers;
-        inner.known_peer_urls = session.known_peer_urls;
-        inner.text_channels = session.text_channels;
-        inner.call_rooms = session.call_rooms;
-        inner.profiles = session.profiles;
-        for profile in inner.profiles.values_mut() {
-            profile.status = "offline".into();
+        {
+            let mut inner = state.inner.lock().expect("state");
+            apply_session(&mut inner, session);
         }
-        inner.last_seen.clear();
-        drop(inner);
         refresh_archive(app);
         crate::relay::spawn(app.clone());
+        let urls: Vec<String> = {
+            let inner = state.inner.lock().expect("state");
+            unique_urls(
+                inner
+                    .known_peer_urls
+                    .iter()
+                    .cloned()
+                    .chain(inner.invite_peers.iter().cloned()),
+            )
+        };
+        connect_inviter(app.clone(), urls);
+        nudge_community_sync(app.clone());
     }
     spawn_presence_pulse(app.clone());
+    spawn_peer_redial(app.clone());
 }
 
 fn spawn_presence_pulse(app: AppHandle) {
@@ -592,14 +931,16 @@ fn spawn_presence_pulse(app: AppHandle) {
         loop {
             tick.tick().await;
             let state = state_of(&app);
-            let in_community = state
-                .inner
-                .lock()
-                .expect("state")
-                .community
-                .is_some();
+            let (in_community, in_voice) = {
+                let inner = state.inner.lock().expect("state");
+                (inner.community.is_some(), seated_in_call(&inner))
+            };
             if !in_community {
                 continue;
+            }
+            // Re-broadcast seats so a lost join does not leave a peer "sharing" with no room.
+            if in_voice {
+                fanout(&state, &voice_json(&state), None);
             }
             let json = presence_json(&state);
             fanout(&state, &json, None);
@@ -742,6 +1083,7 @@ fn is_cgnat_v4(ip: Ipv4Addr) -> bool {
     o[0] == 100 && (64..128).contains(&o[1])
 }
 
+#[allow(dead_code)]
 fn same_home_lan(a: Ipv4Addr, b: Ipv4Addr) -> bool {
     let ao = a.octets();
     let bo = b.octets();
@@ -757,10 +1099,6 @@ fn same_home_lan(a: Ipv4Addr, b: Ipv4Addr) -> bool {
     a == b
 }
 
-fn on_same_lan(url: &str) -> bool {
-    should_dial(url)
-}
-
 fn should_dial(url: &str) -> bool {
     let Some((host, _)) = parse_ws(url) else {
         return false;
@@ -769,13 +1107,7 @@ fn should_dial(url: &str) -> bool {
         return true;
     }
     if let Ok(v4) = host.parse::<Ipv4Addr>() {
-        if !usable_v4(v4) {
-            return false;
-        }
-        if v4.is_private() || is_cgnat_v4(v4) {
-            return lan_ipv4s().iter().any(|mine| same_home_lan(*mine, v4));
-        }
-        return true;
+        return usable_v4(v4);
     }
     if let Ok(v6) = host.parse::<Ipv6Addr>() {
         return usable_v6(v6);
@@ -784,21 +1116,22 @@ fn should_dial(url: &str) -> bool {
 }
 
 fn invite_peer_list(inner: &Inner) -> Vec<String> {
-    let mut peers = inner
-        .listen_urls
-        .iter()
-        .filter(|u| should_dial(u))
-        .cloned()
-        .collect::<Vec<_>>();
-    if peers.is_empty() && !inner.listen_url.is_empty() && should_dial(&inner.listen_url) {
-        peers.push(inner.listen_url.clone());
-    }
-    for extra in inner.invite_peers.iter().chain(inner.known_peer_urls.iter()) {
-        if extra.is_empty() || !should_dial(extra) || peers.iter().any(|p| p == extra) {
-            continue;
-        }
-        peers.push(extra.clone());
-    }
+    // Loopback in an invite makes the other person dial themselves.
+    // LAN + public (when NAT discovery already ran) are the useful ones.
+    let own = unique_urls(
+        inner
+            .listen_urls
+            .iter()
+            .cloned()
+            .chain(std::iter::once(inner.listen_url.clone())),
+    )
+    .into_iter()
+    .filter(|u| {
+        should_dial(u) && parse_ws(u).is_some_and(|(h, _)| !is_loopback_host(&h))
+    })
+    .collect::<Vec<_>>();
+    let mut peers = prefer_non_loopback(own);
+    peers.truncate(3);
     peers
 }
 
@@ -814,6 +1147,60 @@ fn unique_urls(urls: impl IntoIterator<Item = String>) -> Vec<String> {
     out
 }
 
+fn is_relay_key(key: &str) -> bool {
+    key == "relay" || key.starts_with("relay:")
+}
+
+fn is_direct_remote_key(key: &str) -> bool {
+    !is_relay_key(key) && !key.starts_with("pending:")
+}
+
+fn live_direct_peer(state: &AppState) -> bool {
+    state
+        .remotes
+        .lock()
+        .expect("remotes")
+        .keys()
+        .any(|k| is_direct_remote_key(k))
+}
+
+fn prefer_non_loopback(urls: Vec<String>) -> Vec<String> {
+    let lan: Vec<String> = urls
+        .iter()
+        .filter(|url| parse_ws(url).is_some_and(|(h, _)| !is_loopback_host(&h)))
+        .cloned()
+        .collect();
+    if lan.is_empty() {
+        urls
+    } else {
+        lan
+    }
+}
+
+fn inviter_dial_urls(inner: &Inner, urls: Vec<String>) -> Vec<String> {
+    let usable: Vec<String> = unique_urls(urls)
+        .into_iter()
+        .filter(|url| {
+            (url.starts_with("ws://") || url.starts_with("wss://"))
+                && !is_self_url(inner, url)
+                && should_dial(url)
+        })
+        .collect();
+    prefer_non_loopback(usable)
+}
+
+fn bump_links(state: &AppState) {
+    state.link_gen.fetch_add(1, Ordering::SeqCst);
+    state.remotes.lock().expect("remotes").clear();
+    state.link_pks.lock().expect("link_pks").clear();
+    state.outbox.lock().expect("outbox").clear();
+    // Drop gossip dedup so a rejoin can accept the same layout/presence catch-up
+    // payloads that were seen in a previous session on this process.
+    let mut guard = state.seen.lock().expect("seen");
+    guard.0.clear();
+    guard.1.clear();
+}
+
 fn pick_port(start: u16) -> Result<u16, String> {
     let preferred = std::env::var("CHAINCORD_PEER_PORT")
         .ok()
@@ -825,6 +1212,34 @@ fn pick_port(start: u16) -> Result<u16, String> {
         }
     }
     Err("nenhuma porta livre".into())
+}
+
+fn allow_windows_listen(port: u16) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let end = port.saturating_add(19);
+        let _ = std::process::Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=Chaincord",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                &format!("localport={port}-{end}"),
+                "profile=any",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = port;
+    }
 }
 
 pub async fn run_listener(app: AppHandle) -> Result<(), String> {
@@ -844,14 +1259,17 @@ pub async fn run_listener(app: AppHandle) -> Result<(), String> {
     }
     emit_state(&app);
     crate::nat::spawn(app.clone(), port);
-    let peers: Vec<String> = state_of(&app)
-        .inner
-        .lock()
-        .expect("state")
-        .known_peer_urls
-        .iter()
-        .cloned()
-        .collect();
+    let peers: Vec<String> = {
+        let state = state_of(&app);
+        let inner = state.inner.lock().expect("state");
+        unique_urls(
+            inner
+                .known_peer_urls
+                .iter()
+                .cloned()
+                .chain(inner.invite_peers.iter().cloned()),
+        )
+    };
     for url in peers {
         connect_peer(app.clone(), url);
     }
@@ -859,6 +1277,7 @@ pub async fn run_listener(app: AppHandle) -> Result<(), String> {
     let listener = TcpListener::bind(("0.0.0.0", port))
         .await
         .map_err(|e| e.to_string())?;
+    allow_windows_listen(port);
 
     loop {
         let Ok((stream, _)) = listener.accept().await else {
@@ -866,9 +1285,35 @@ pub async fn run_listener(app: AppHandle) -> Result<(), String> {
         };
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let Ok(ws) = accept_async(stream).await else {
+            let mqtt = std::sync::Arc::new(AtomicBool::new(false));
+            let flag = mqtt.clone();
+            let Ok(ws) = accept_hdr_async(stream, move |req: &Request, mut response: Response| {
+                let wants_mqtt = req
+                    .headers()
+                    .get(SEC_WEBSOCKET_PROTOCOL)
+                    .and_then(|h| h.to_str().ok())
+                    .map(|v| {
+                        v.split(',')
+                            .any(|p| p.trim().eq_ignore_ascii_case("mqtt"))
+                    })
+                    .unwrap_or(false);
+                if wants_mqtt {
+                    flag.store(true, Ordering::SeqCst);
+                    response.headers_mut().insert(
+                        SEC_WEBSOCKET_PROTOCOL,
+                        HeaderValue::from_static("mqtt"),
+                    );
+                }
+                Ok(response)
+            })
+            .await
+            else {
                 return;
             };
+            if mqtt.load(Ordering::SeqCst) {
+                crate::relay::serve_hub(app, ws).await;
+                return;
+            }
             let (tx, rx) = mpsc::unbounded_channel::<String>();
             let key = format!(
                 "pending:{}",
@@ -885,13 +1330,68 @@ pub async fn run_listener(app: AppHandle) -> Result<(), String> {
 }
 
 fn fanout(state: &AppState, json: &str, except: Option<&str>) {
+    let json = stamp_community(state, json);
+    let skip_relays = except.is_some_and(is_relay_key);
     let remotes = state.remotes.lock().expect("remotes");
     for (url, tx) in remotes.iter() {
         if Some(url.as_str()) == except {
             continue;
         }
-        let _ = tx.send(json.to_string());
+        if skip_relays && is_relay_key(url) {
+            continue;
+        }
+        let _ = tx.send(json.clone());
     }
+}
+
+fn remember_outbox(state: &AppState, json: &str) {
+    if json.is_empty() || json.len() > 48_000 {
+        return;
+    }
+    let mut q = state.outbox.lock().expect("outbox");
+    if q.iter().any(|m| m == json) {
+        return;
+    }
+    q.push_back(json.to_string());
+    while q.len() > 80 {
+        q.pop_front();
+    }
+}
+
+pub(crate) fn flush_outbox(state: &AppState) {
+    let msgs: Vec<String> = state
+        .outbox
+        .lock()
+        .expect("outbox")
+        .iter()
+        .cloned()
+        .collect();
+    if msgs.is_empty() {
+        return;
+    }
+    let remotes = state.remotes.lock().expect("remotes");
+    if remotes.is_empty() {
+        return;
+    }
+    for json in msgs {
+        let json = stamp_community(state, &json);
+        for tx in remotes.values() {
+            let _ = tx.send(json.clone());
+        }
+    }
+}
+
+fn nudge_outbox(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        for delay in [400u64, 1200, 3000, 8000] {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            let state = state_of(&app);
+            if state.inner.lock().expect("state").community.is_none() {
+                return;
+            }
+            flush_outbox(&state);
+        }
+    });
 }
 
 fn hello_and_peers_json(state: &AppState, compact: bool) -> Option<(String, String)> {
@@ -909,6 +1409,9 @@ fn hello_and_peers_json(state: &AppState, compact: bool) -> Option<(String, Stri
         "status": own_status(&inner),
         "muted": inner.muted,
         "deafened": inner.deafened,
+        "sharingScreen": inner.sharing_screen,
+        // Unique per handshake so reconnects are not dropped by already_seen.
+        "ts": now_ms(),
     });
     drop(inner);
     let peers = serde_json::json!({ "type": "peers", "urls": gossip_urls(state) });
@@ -929,7 +1432,11 @@ pub(crate) fn handshake_messages(app: &AppHandle, compact: bool) -> Vec<String> 
         out.push(presence_frame(&inner, true));
         let people = live_profiles(&inner, now_ms(), true);
         drop(inner);
-        out.push(serde_json::json!({ "type": "presence-state", "people": people }).to_string());
+        out.push(
+            serde_json::json!({ "type": "presence-state", "ts": now_ms(), "people": people })
+                .to_string(),
+        );
+        out.push(history_request_json(&state));
         let (_, _, hist) = history_payload(&state);
         if let Some(hist) = hist {
             if hist.len() < 40_000 {
@@ -940,6 +1447,7 @@ pub(crate) fn handshake_messages(app: &AppHandle, compact: bool) -> Vec<String> 
     }
     out.push(presence_json(&state));
     out.push(presence_state_json(&state));
+    out.push(history_request_json(&state));
     if let (_, _, Some(hist)) = history_payload(&state) {
         out.push(hist);
     }
@@ -960,7 +1468,9 @@ fn gossip_urls(state: &AppState) -> Vec<String> {
             urls.push(url.clone());
         }
     }
-    urls.retain(|u| !u.is_empty());
+    urls.retain(|u| {
+        !u.is_empty() && parse_ws(u).is_some_and(|(h, _)| !is_loopback_host(&h))
+    });
     urls
 }
 
@@ -970,18 +1480,77 @@ fn layout_json(state: &AppState) -> String {
         "type": "layout",
         "textChannels": inner.text_channels,
         "callRooms": inner.call_rooms,
+        // Unique per advertise so retries are not dropped by already_seen.
+        "ts": now_ms(),
     })
     .to_string()
 }
 
+fn history_request_json(state: &AppState) -> String {
+    let inner = state.inner.lock().expect("state");
+    serde_json::json!({
+        "type": "history-request",
+        "publicKey": inner.identity.public_hex(),
+        "historyCount": inner.archive_messages,
+        "ts": now_ms(),
+    })
+    .to_string()
+}
+
+fn nudge_community_sync(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        for delay in [400u64, 1200, 3000] {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            let state = state_of(&app);
+            if state.inner.lock().expect("state").community.is_none() {
+                return;
+            }
+            // Relay/direct links may come up after join/create; re-advertise roster
+            // and rooms so late peers catch up without waiting for a new hello.
+            fanout(&state, &layout_json(&state), None);
+            if voice_busy(&state) {
+                fanout(&state, &voice_json(&state), None);
+            }
+            fanout(&state, &presence_json(&state), None);
+            fanout(&state, &presence_state_json(&state), None);
+            fanout(&state, &history_request_json(&state), None);
+            flush_outbox(&state);
+        }
+    });
+}
+
+fn nudge_layout_sync(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        for delay in [400u64, 1200, 2500] {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            let state = state_of(&app);
+            if state.inner.lock().expect("state").community.is_none() {
+                return;
+            }
+            fanout(&state, &layout_json(&state), None);
+        }
+    });
+}
+
 fn voice_json(state: &AppState) -> String {
     let inner = state.inner.lock().expect("state");
-    let rooms: HashMap<String, Vec<String>> = inner
-        .voice
-        .iter()
-        .map(|(room, people)| (room.clone(), people.iter().cloned().collect()))
-        .collect();
-    serde_json::json!({ "type": "voice-state", "rooms": rooms }).to_string()
+    let mut rooms = serde_json::Map::new();
+    let mut keys: Vec<String> = inner.voice.keys().cloned().collect();
+    keys.sort();
+    for room in keys {
+        let Some(people) = inner.voice.get(&room) else {
+            continue;
+        };
+        let mut list: Vec<String> = people.iter().cloned().collect();
+        list.sort();
+        rooms.insert(room, serde_json::json!(list));
+    }
+    serde_json::json!({
+        "type": "voice-state",
+        "publicKey": inner.identity.public_hex(),
+        "rooms": rooms,
+    })
+    .to_string()
 }
 
 fn voice_is_busy(inner: &Inner) -> bool {
@@ -1006,6 +1575,7 @@ pub(crate) fn goodbye_json(app: &AppHandle) -> String {
         "status": "offline",
         "muted": inner.muted,
         "deafened": inner.deafened,
+        "sharingScreen": inner.sharing_screen,
     })
     .to_string()
 }
@@ -1018,6 +1588,7 @@ pub fn announce_gone(app: &AppHandle) {
             return;
         }
         inner.status = "offline".into();
+        inner.sharing_screen = false;
         let pk = inner.identity.public_hex();
         let rooms = drop_from_voice(&mut inner, &pk);
         (pk, rooms)
@@ -1045,14 +1616,23 @@ fn presence_frame(inner: &Inner, compact: bool) -> String {
         "avatar": if compact { "" } else { inner.avatar.as_str() },
         "muted": inner.muted,
         "deafened": inner.deafened,
+        "sharingScreen": inner.sharing_screen,
         "status": own_status(inner),
+        // Heartbeats are otherwise identical and already_seen would drop them,
+        // so last_seen would expire and peers would look offline.
+        "ts": now_ms(),
     })
     .to_string()
 }
 
 fn presence_state_json(state: &AppState) -> String {
     let inner = state.inner.lock().expect("state");
-    serde_json::json!({ "type": "presence-state", "people": live_profiles(&inner, now_ms(), false) }).to_string()
+    serde_json::json!({
+        "type": "presence-state",
+        "ts": now_ms(),
+        "people": live_profiles(&inner, now_ms(), false),
+    })
+    .to_string()
 }
 
 fn snapshot_profiles(inner: &Inner) -> HashMap<String, PeerProfile> {
@@ -1066,12 +1646,16 @@ fn snapshot_profiles(inner: &Inner) -> HashMap<String, PeerProfile> {
             avatar: inner.avatar.clone(),
             muted: inner.muted,
             deafened: inner.deafened,
+            sharing_screen: inner.sharing_screen,
             status: own_status(inner),
         },
     );
     for (pk, profile) in map.iter_mut() {
         if *pk != me {
             profile.status = live_status(inner, pk, now);
+            if profile.sharing_screen && !peer_in_voice(inner, pk) {
+                profile.sharing_screen = false;
+            }
         }
     }
     map
@@ -1125,6 +1709,7 @@ fn live_profiles(inner: &Inner, now: i64, strip_avatars: bool) -> HashMap<String
             },
             muted: inner.muted,
             deafened: inner.deafened,
+            sharing_screen: inner.sharing_screen,
             status: own_status(inner),
         },
     );
@@ -1158,8 +1743,10 @@ fn expire_stale_presence(inner: &mut Inner, now: i64) -> Vec<(String, String)> {
         inner.last_seen.remove(&pk);
         if let Some(profile) = inner.profiles.get_mut(&pk) {
             profile.status = "offline".into();
+            profile.sharing_screen = false;
         }
     }
+    scrub_unseated_sharing(inner);
     Vec::new()
 }
 
@@ -1176,23 +1763,53 @@ fn drop_from_voice(inner: &mut Inner, pk: &str) -> Vec<String> {
     for people in inner.voice.values_mut() {
         people.remove(pk);
     }
+    if let Some(profile) = inner.profiles.get_mut(pk) {
+        profile.sharing_screen = false;
+    }
     normalize_voice(inner);
     rooms
+}
+
+fn peer_in_voice(inner: &Inner, pk: &str) -> bool {
+    !pk.is_empty() && inner.voice.values().any(|people| people.contains(pk))
+}
+
+/// Screen-share flags only make sense while seated; clear ghosts after leave/desync.
+fn scrub_unseated_sharing(inner: &mut Inner) {
+    let me = inner.identity.public_hex();
+    let seated: HashSet<String> = inner
+        .voice
+        .values()
+        .flat_map(|people| people.iter().cloned())
+        .collect();
+    for (pk, profile) in inner.profiles.iter_mut() {
+        if pk != &me && profile.sharing_screen && !seated.contains(pk) {
+            profile.sharing_screen = false;
+        }
+    }
+    if !seated.contains(&me) {
+        inner.sharing_screen = false;
+    }
 }
 
 fn mark_peer_offline(inner: &mut Inner, pk: &str) -> Vec<String> {
     inner.last_seen.remove(pk);
     if let Some(profile) = inner.profiles.get_mut(pk) {
         profile.status = "offline".into();
+        profile.sharing_screen = false;
     }
-    drop_from_voice(inner, pk)
+    // Voice leave is a separate frame. MQTT wills / presence blips must not
+    // yank someone out of the call or the hub flaps 3↔2.
+    Vec::new()
 }
 
+#[allow(dead_code)]
 fn drop_disconnected_peer(inner: &mut Inner, pk: &str) -> Vec<(String, String)> {
     if pk.is_empty() || pk == inner.identity.public_hex() {
         return Vec::new();
     }
-    mark_peer_offline(inner, pk)
+    mark_peer_offline(inner, pk);
+    drop_from_voice(inner, pk)
         .into_iter()
         .map(|room| (pk.to_string(), room))
         .collect()
@@ -1202,7 +1819,7 @@ fn remember_link_pk(state: &AppState, url: Option<&str>, pk: &str) {
     let Some(url) = url else {
         return;
     };
-    if url.is_empty() || url == "relay" || pk.is_empty() {
+    if url.is_empty() || is_relay_key(url) || pk.is_empty() {
         return;
     }
     state
@@ -1212,41 +1829,25 @@ fn remember_link_pk(state: &AppState, url: Option<&str>, pk: &str) {
         .insert(url.to_string(), pk.to_string());
 }
 
-fn on_peer_socket_closed(app: &AppHandle, url: Option<String>) {
+fn on_peer_socket_closed(app: &AppHandle, url: Option<String>, gen: u64) {
+    let state = state_of(app);
+    if state.link_gen.load(Ordering::SeqCst) != gen {
+        return;
+    }
     let Some(url) = url else {
         return;
     };
-    let state = state_of(app);
     state.remotes.lock().expect("remotes").remove(&url);
-    if url == "relay" {
+    if is_relay_key(&url) {
         emit_state(app);
         return;
     }
-    let pk = {
-        let mut map = state.link_pks.lock().expect("link_pks");
-        let pk = map.remove(&url);
-        if let Some(ref pk) = pk {
-            map.retain(|_, v| v != pk);
-        }
-        pk
-    };
-    let Some(pk) = pk else {
-        emit_state(app);
-        return;
-    };
-    let leaves = {
-        let mut inner = state.inner.lock().expect("state");
-        drop_disconnected_peer(&mut inner, &pk)
-    };
-    let gone = serde_json::json!({
-        "type": "presence",
-        "publicKey": pk,
-        "status": "offline",
-    })
-    .to_string();
-    fanout(&state, &gone, None);
-    fanout_voice_leaves(&state, &leaves);
+    state.link_pks.lock().expect("link_pks").remove(&url);
     emit_state(app);
+    // Direct sockets die behind NAT all the time. Presence lives on MQTT
+    // heartbeats / TTL — do not broadcast "offline" or the other person
+    // vanishes while they are still sending chat.
+    connect_peer(app.clone(), url);
 }
 
 fn voice_leave_json(room: &str, pk: &str) -> String {
@@ -1273,12 +1874,23 @@ fn touch_seen(inner: &mut Inner, pk: &str) {
     inner.last_seen.insert(pk.to_string(), now_ms());
 }
 
+fn ignore_relay_offline(inner: &Inner, pk: &str, from_relay: bool, status: Option<&str>) -> bool {
+    if !from_relay || status != Some("offline") || pk.is_empty() {
+        return false;
+    }
+    let Some(last) = inner.last_seen.get(pk) else {
+        return false;
+    };
+    now_ms().saturating_sub(*last) < 45_000
+}
+
 fn apply_presence(inner: &mut Inner, frame: &serde_json::Value, from_snapshot: bool) -> Vec<String> {
     let pk = json_str(frame.get("publicKey"));
     if pk.is_empty() || pk == inner.identity.public_hex() {
         return Vec::new();
     }
     let status_raw = frame.get("status").and_then(|v| v.as_str());
+    let seated = peer_in_voice(inner, &pk);
     {
         let entry = inner.profiles.entry(pk.clone()).or_default();
         let name = json_str(frame.get("displayName"));
@@ -1294,6 +1906,12 @@ fn apply_presence(inner: &mut Inner, frame: &serde_json::Value, from_snapshot: b
         }
         if let Some(deafened) = frame.get("deafened").and_then(|v| v.as_bool()) {
             entry.deafened = deafened;
+        }
+        if let Some(sharing) = frame.get("sharingScreen").and_then(|v| v.as_bool()) {
+            // Ignore "sharing" from someone who is not in any voice room on our view.
+            entry.sharing_screen = sharing && seated;
+        } else if !seated {
+            entry.sharing_screen = false;
         }
         if status_raw != Some("offline") && (!from_snapshot || status_raw.is_some()) {
             entry.status = normalize_status(status_raw.unwrap_or("online"));
@@ -1359,28 +1977,105 @@ fn normalize_voice(inner: &mut Inner) {
     inner.voice = next;
 }
 
-fn merge_voice_rooms(inner: &mut Inner, rooms: &serde_json::Map<String, serde_json::Value>) {
+fn voice_left_held(inner: &Inner, pk: &str, now: i64) -> bool {
+    inner
+        .voice_left
+        .get(pk)
+        .is_some_and(|ts| now.saturating_sub(*ts) < VOICE_LEAVE_HOLD_MS)
+}
+
+fn recently_voice_joined(inner: &Inner, pk: &str, now: i64) -> bool {
+    inner
+        .voice_joined
+        .get(pk)
+        .is_some_and(|ts| now.saturating_sub(*ts) < VOICE_JOIN_GRACE_MS)
+}
+
+fn mark_voice_left(inner: &mut Inner, pk: &str) {
+    if pk.is_empty() || pk == inner.identity.public_hex() {
+        return;
+    }
+    inner.voice_left.insert(pk.to_string(), now_ms());
+    inner.voice_joined.remove(pk);
+    drop_from_voice(inner, pk);
+}
+
+fn note_voice_join(inner: &mut Inner, pk: &str) {
+    inner.voice_left.remove(pk);
+    inner.voice_joined.insert(pk.to_string(), now_ms());
+}
+
+fn merge_voice_rooms(
+    inner: &mut Inner,
+    rooms: &serde_json::Map<String, serde_json::Value>,
+    from_pk: &str,
+) {
     let now = now_ms();
+    let me = inner.identity.public_hex();
+    let mut listed: Vec<(String, HashSet<String>)> = Vec::new();
     for (room, people) in rooms {
-        let incoming: HashSet<String> = people
+        let room = slug_name(room);
+        if room.is_empty() {
+            continue;
+        }
+        let incoming: Vec<String> = people
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .filter(|pk| live_status(inner, pk, now) != "offline")
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .filter(|pk| !pk.is_empty() && pk != &me)
                     .collect()
             })
             .unwrap_or_default();
-        if incoming.is_empty() {
-            continue;
+        if !incoming.is_empty() {
+            listed.push((room.clone(), incoming.iter().cloned().collect()));
         }
-        inner
-            .voice
-            .entry(slug_name(room))
-            .or_default()
-            .extend(incoming);
+        for pk in incoming {
+            // Sender asserting their own seat always wins over a stale leave-hold.
+            if !from_pk.is_empty() && pk == from_pk {
+                for seated in inner.voice.values_mut() {
+                    seated.remove(&pk);
+                }
+                inner.voice.entry(room.clone()).or_default().insert(pk.clone());
+                note_voice_join(inner, &pk);
+                continue;
+            }
+            if voice_left_held(inner, &pk, now) {
+                continue;
+            }
+            let already = inner.voice.iter().any(|(_, seated)| seated.contains(&pk));
+            if already {
+                continue;
+            }
+            inner.voice.entry(room.clone()).or_default().insert(pk.clone());
+            note_voice_join(inner, &pk);
+        }
+    }
+    if !from_pk.is_empty() && from_pk != me {
+        let drop: Vec<String> = listed
+            .iter()
+            .filter(|(_, set)| set.contains(from_pk))
+            .flat_map(|(room, set)| {
+                inner
+                    .voice
+                    .get(room)
+                    .into_iter()
+                    .flatten()
+                    .filter(|pk| {
+                        pk.as_str() != me
+                            && pk.as_str() != from_pk
+                            && !set.contains(*pk)
+                            && !recently_voice_joined(inner, pk, now)
+                    })
+                    .cloned()
+            })
+            .collect();
+        for pk in drop {
+            mark_voice_left(inner, &pk);
+        }
     }
     normalize_voice(inner);
+    scrub_unseated_sharing(inner);
 }
 
 fn apply_voice_action(inner: &mut Inner, room: &str, action: &str, pk: &str) {
@@ -1388,18 +2083,18 @@ fn apply_voice_action(inner: &mut Inner, room: &str, action: &str, pk: &str) {
     if room.is_empty() || pk.is_empty() {
         return;
     }
+    // Only join_call / leave_call mutate our own seat.
+    if pk == inner.identity.public_hex() {
+        return;
+    }
     if action == "join" {
+        note_voice_join(inner, pk);
         for people in inner.voice.values_mut() {
             people.remove(pk);
         }
         inner.voice.entry(room).or_default().insert(pk.to_string());
     } else if action == "leave" {
-        if pk == inner.identity.public_hex() {
-            return;
-        }
-        if let Some(people) = inner.voice.get_mut(&room) {
-            people.remove(pk);
-        }
+        mark_voice_left(inner, pk);
     }
     normalize_voice(inner);
 }
@@ -1408,6 +2103,8 @@ fn reset_rooms(inner: &mut Inner) {
     inner.text_channels = vec!["general".into()];
     inner.call_rooms.clear();
     inner.voice.clear();
+    inner.voice_left.clear();
+    inner.voice_joined.clear();
 }
 
 pub fn connect_peer(app: AppHandle, url: String) {
@@ -1436,41 +2133,70 @@ pub fn connect_peer(app: AppHandle, url: String) {
 fn connect_inviter(app: AppHandle, urls: Vec<String>) {
     tauri::async_runtime::spawn(async move {
         let state = state_of(&app);
-        let urls: Vec<String> = unique_urls(urls)
-            .into_iter()
-            .filter(|url| {
-                (url.starts_with("ws://") || url.starts_with("wss://"))
-                    && !is_self_url(&state.inner.lock().expect("state"), url)
-                    && on_same_lan(url)
-            })
-            .collect();
-        for url in urls {
-            let already_live = state
-                .remotes
-                .lock()
-                .expect("remotes")
-                .keys()
-                .any(|k| !k.starts_with("pending:"));
-            if already_live {
+        for attempt in 0..12u32 {
+            if live_direct_peer(&state) {
                 return;
             }
-            match dial_ws(&url).await {
-                Ok(ws) => {
-                    {
-                        let mut inner = state.inner.lock().expect("state");
-                        inner.known_peer_urls.insert(url.clone());
-                    }
-                    let (tx, rx) = mpsc::unbounded_channel::<String>();
-                    state
-                        .remotes
-                        .lock()
-                        .expect("remotes")
-                        .insert(url.clone(), tx.clone());
-                    emit_state(&app);
-                    serve_connected(app, ws, Some(url), tx, rx).await;
+            let filtered = {
+                let inner = state.inner.lock().expect("state");
+                if inner.community.is_none() {
                     return;
                 }
-                Err(_) => {}
+                inviter_dial_urls(&inner, urls.clone())
+            };
+            for url in filtered {
+                if live_direct_peer(&state) {
+                    return;
+                }
+                match dial_ws(&url).await {
+                    Ok(ws) => {
+                        {
+                            let mut inner = state.inner.lock().expect("state");
+                            inner.known_peer_urls.insert(url.clone());
+                        }
+                        let (tx, rx) = mpsc::unbounded_channel::<String>();
+                        state
+                            .remotes
+                            .lock()
+                            .expect("remotes")
+                            .insert(url.clone(), tx.clone());
+                        emit_state(&app);
+                        serve_connected(app, ws, Some(url), tx, rx).await;
+                        return;
+                    }
+                    Err(_) => {}
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt + 1))).await;
+        }
+    });
+}
+
+fn spawn_peer_redial(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(8));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let state = state_of(&app);
+            if live_direct_peer(&state) {
+                continue;
+            }
+            let urls = {
+                let inner = state.inner.lock().expect("state");
+                if inner.community.is_none() {
+                    continue;
+                }
+                unique_urls(
+                    inner
+                        .known_peer_urls
+                        .iter()
+                        .cloned()
+                        .chain(inner.invite_peers.iter().cloned()),
+                )
+            };
+            for url in urls {
+                connect_peer(app.clone(), url);
             }
         }
     });
@@ -1482,7 +2208,7 @@ async fn dial_ws(
     WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     String,
 > {
-    match tokio::time::timeout(Duration::from_secs(2), connect_async(url)).await {
+    match tokio::time::timeout(Duration::from_secs(8), connect_async(url)).await {
         Ok(Ok((ws, _))) => Ok(ws),
         Ok(Err(err)) => Err(err.to_string()),
         Err(_) => Err("tempo esgotado".into()),
@@ -1514,10 +2240,12 @@ async fn serve_connected<S>(
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let gen = state_of(&app).link_gen.load(Ordering::SeqCst);
     let (mut sink, mut stream) = ws.split();
     for msg in handshake_messages(&app, false) {
-        let _ = tx.send(msg);
+        let _ = tx.send(stamp_community(&state_of(&app), &msg));
     }
+    flush_outbox(&state_of(&app));
 
     loop {
         tokio::select! {
@@ -1530,12 +2258,12 @@ async fn serve_connected<S>(
             incoming = stream.next() => {
                 let Some(Ok(msg)) = incoming else { break; };
                 let Message::Text(text) = msg else { continue; };
-                handle_remote(&app, text.as_str(), &mut known_url, &tx);
+                handle_remote(&app, text.as_str(), &mut known_url, &tx, gen);
             }
         }
     }
 
-    on_peer_socket_closed(&app, known_url);
+    on_peer_socket_closed(&app, known_url, gen);
 }
 
 fn handle_remote(
@@ -1543,15 +2271,35 @@ fn handle_remote(
     raw: &str,
     from_url: &mut Option<String>,
     tx: &mpsc::UnboundedSender<String>,
+    gen: u64,
 ) {
-    if already_seen(app, raw) {
+    if state_of(app).link_gen.load(Ordering::SeqCst) != gen {
         return;
     }
-    let state = state_of(app);
     let Ok(frame) = serde_json::from_str::<serde_json::Value>(raw) else {
         return;
     };
     let kind = frame.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let duplicate = already_seen(app, raw);
+    // Identical RTC retries must still reach the UI: the first copy often
+    // arrives before CallNet exists. Do not fanout duplicates or MQTT loops.
+    if duplicate && kind != "rtc" {
+        return;
+    }
+    let state = state_of(app);
+    let live_id = state
+        .inner
+        .lock()
+        .expect("state")
+        .community
+        .as_ref()
+        .map(|c| c.id.clone());
+    let Some(live_id) = live_id else {
+        return;
+    };
+    if !frame_matches_community(&frame, &live_id) {
+        return;
+    }
     match kind {
         "hello" => {
             let community_id = frame
@@ -1594,7 +2342,23 @@ fn handle_remote(
                 .get("historyCount")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
-            if from_url.as_deref() != Some("relay") && !listen.is_empty() {
+            let extra_urls: Vec<String> = {
+                let inner = state.inner.lock().expect("state");
+                unique_urls(
+                    std::iter::once(listen.clone()).chain(
+                        frame
+                            .get("listenUrls")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| v.as_str().map(str::to_string)),
+                    ),
+                )
+                .into_iter()
+                .filter(|url| should_dial(url) && !is_self_url(&inner, url))
+                .collect()
+            };
+            if !is_relay_key(from_url.as_deref().unwrap_or("")) && !listen.is_empty() {
                 let mut remotes = state.remotes.lock().expect("remotes");
                 if let Some(old) = from_url.as_ref() {
                     if old != &listen {
@@ -1618,11 +2382,27 @@ fn handle_remote(
             fanout(&state, &presence_json(&state), None);
             fanout(&state, &presence_state_json(&state), None);
             maybe_seed_peer(app, &hello_pk, their_history);
+            let our_count = state
+                .inner
+                .lock()
+                .expect("state")
+                .archive_messages;
+            if their_history > our_count {
+                let _ = tx.send(history_request_json(&state));
+            }
+            for url in extra_urls {
+                connect_peer(app.clone(), url);
+            }
+        }
+        "history-request" => {
+            let pk = json_str(frame.get("publicKey"));
+            let their_count = frame
+                .get("historyCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            maybe_seed_peer(app, &pk, their_count);
         }
         "peers" => {
-            if from_url.as_deref() == Some("relay") {
-                return;
-            }
             let urls = frame
                 .get("urls")
                 .and_then(|v| v.as_array())
@@ -1661,6 +2441,7 @@ fn handle_remote(
                     ts: plain.ts,
                     channel: plain.channel,
                     is_self: wire.sender == my_pk,
+                    community_id: live_id.clone(),
                 },
             );
             {
@@ -1701,7 +2482,7 @@ fn handle_remote(
         "voice-state" => {
             if let Some(rooms) = frame.get("rooms").and_then(|v| v.as_object()) {
                 let mut inner = state.inner.lock().expect("state");
-                merge_voice_rooms(&mut inner, rooms);
+                merge_voice_rooms(&mut inner, rooms, &json_str(frame.get("publicKey")));
             }
             emit_state(app);
             fanout(&state, raw, from_url.as_deref());
@@ -1725,11 +2506,20 @@ fn handle_remote(
             }
             emit_state(app);
             fanout(&state, raw, from_url.as_deref());
-            if action == "join" {
+            if action == "join" || action == "leave" {
                 fanout(&state, &voice_json(&state), None);
             }
         }
         "presence" => {
+            let from_relay = is_relay_key(from_url.as_deref().unwrap_or(""));
+            let pk = json_str(frame.get("publicKey"));
+            let status = frame.get("status").and_then(|v| v.as_str());
+            {
+                let inner = state.inner.lock().expect("state");
+                if ignore_relay_offline(&inner, &pk, from_relay, status) {
+                    return;
+                }
+            }
             let leaves = {
                 let mut inner = state.inner.lock().expect("state");
                 apply_presence(&mut inner, &frame, false)
@@ -1752,6 +2542,7 @@ fn handle_remote(
                         "avatar": json_str(value.get("avatar")),
                         "muted": value.get("muted"),
                         "deafened": value.get("deafened"),
+                        "sharingScreen": value.get("sharingScreen"),
                     });
                     if let Some(status) = value
                         .get("status")
@@ -1765,10 +2556,13 @@ fn handle_remote(
             }
             emit_state(app);
             persist_session(app);
+            fanout(&state, raw, from_url.as_deref());
         }
         "rtc" => {
             let _ = app.emit("ui-rtc", frame);
-            fanout(&state, raw, from_url.as_deref());
+            if !duplicate {
+                fanout(&state, raw, from_url.as_deref());
+            }
         }
         "history" => {
             let my_pk = state.inner.lock().expect("state").identity.public_hex();
@@ -1810,6 +2604,7 @@ fn handle_remote(
                         text,
                         ts,
                         channel,
+                        community_id: live_id.clone(),
                     },
                 );
             }
@@ -1826,17 +2621,28 @@ pub fn send_signal(app: &AppHandle, frame: serde_json::Value) -> Result<(), Stri
     }
     let state = state_of(app);
     let json = frame.to_string();
+    let _ = already_seen(app, &json);
     fanout(&state, &json, None);
     Ok(())
 }
 
-pub fn create_local(app: &AppHandle, name: &str) {
+pub fn create_local(app: &AppHandle, name: &str, relay: Option<&str>) -> Result<(), String> {
+    let custom = crate::relay::choose_for_create(relay)?;
+    let _ = clear_own_voice(app);
+    // Keep other communities: only park the current one on disk.
+    persist_session(app);
     let state = state_of(app);
-    clear_stored_session(app);
+    state.relay_gen.fetch_add(1, Ordering::SeqCst);
     {
         let mut inner = state.inner.lock().expect("state");
+        inner.viewed_id = None;
         inner.community = Some(create_community(&inner.identity, name));
         inner.invite_peers = inner.listen_urls.clone();
+        inner.relays = if custom.is_empty() {
+            invite_peer_list(&inner)
+        } else {
+            custom
+        };
         inner.known_peer_urls.clear();
         inner.profiles.clear();
         inner.last_seen.clear();
@@ -1844,37 +2650,122 @@ pub fn create_local(app: &AppHandle, name: &str) {
         inner.seeding.clear();
         inner.archive_messages = 0;
         inner.archive_bytes = 0;
+        inner.voice.clear();
         reset_rooms(&mut inner);
     }
-    state.remotes.lock().expect("remotes").clear();
+    bump_links(&state);
     persist_session(app);
+    refresh_archive(app);
     emit_state(app);
     crate::relay::spawn(app.clone());
+    nudge_community_sync(app.clone());
+    Ok(())
 }
 
 pub fn join_community(app: &AppHandle, raw_invite: &str) -> Result<(), String> {
     let invite = decode_invite(raw_invite)?;
+    let community_id = invite.community.id.clone();
     let peers = invite.peers.clone();
+    let relays = invite.relays.clone();
     let state = state_of(app);
-    clear_stored_session(app);
+
+    // Already a member: just switch (and refresh invite peers).
+    let existing = {
+        let guard = state.store.lock().expect("store");
+        guard
+            .as_ref()
+            .and_then(|store| store.load_session(&community_id))
+    };
+    if let Some(mut session) = existing {
+        for url in &peers {
+            if !url.is_empty() {
+                session.known_peer_urls.insert(url.clone());
+            }
+        }
+        if !peers.is_empty() {
+            session.invite_peers = peers.clone();
+        }
+        if !relays.is_empty() {
+            session.relays = relays;
+        }
+        let _ = clear_own_voice(app);
+        persist_session(app);
+        state.relay_gen.fetch_add(1, Ordering::SeqCst);
+        activate_loaded(app, session, true);
+        return Ok(());
+    }
+
+    let _ = clear_own_voice(app);
+    persist_session(app);
+    state.relay_gen.fetch_add(1, Ordering::SeqCst);
     {
         let mut inner = state.inner.lock().expect("state");
+        inner.viewed_id = None;
         inner.community = Some(invite.community);
         inner.invite_peers = peers.clone();
+        inner.relays = relays;
         inner.known_peer_urls.clear();
+        for url in &peers {
+            if should_dial(url) && !is_self_url(&inner, url) {
+                inner.known_peer_urls.insert(url.clone());
+            }
+        }
         inner.profiles.clear();
         inner.last_seen.clear();
         inner.seeded.clear();
         inner.seeding.clear();
         inner.archive_messages = 0;
         inner.archive_bytes = 0;
+        inner.voice.clear();
         reset_rooms(&mut inner);
     }
-    state.remotes.lock().expect("remotes").clear();
+    bump_links(&state);
     persist_session(app);
+    refresh_archive(app);
     emit_state(app);
     connect_inviter(app.clone(), peers);
     crate::relay::spawn(app.clone());
+    nudge_community_sync(app.clone());
+    Ok(())
+}
+
+pub fn switch_community(app: &AppHandle, community_id: &str) -> Result<(), String> {
+    let state = state_of(app);
+    let (live_id, in_call) = {
+        let inner = state.inner.lock().expect("state");
+        (
+            inner.community.as_ref().map(|c| c.id.clone()),
+            seated_in_call(&inner),
+        )
+    };
+    if live_id.as_deref() == Some(community_id) {
+        {
+            let mut inner = state.inner.lock().expect("state");
+            inner.viewed_id = None;
+        }
+        emit_state(app);
+        return Ok(());
+    }
+    let session = {
+        let guard = state.store.lock().expect("store");
+        guard
+            .as_ref()
+            .and_then(|store| store.load_session(community_id))
+            .ok_or_else(|| "comunidade nao encontrada".to_string())?
+    };
+    if in_call {
+        persist_session(app);
+        {
+            let mut inner = state.inner.lock().expect("state");
+            inner.viewed_id = Some(session.community.id);
+        }
+        emit_state(app);
+        return Ok(());
+    }
+    let _ = clear_own_voice(app);
+    persist_session(app);
+    state.relay_gen.fetch_add(1, Ordering::SeqCst);
+    activate_loaded(app, session, true);
     Ok(())
 }
 
@@ -1885,6 +2776,54 @@ pub fn send_chat(app: &AppHandle, text: &str, channel: &str) -> Result<(), Strin
         return Ok(());
     }
     let channel = slug_name(channel);
+    let viewed = {
+        let inner = state.inner.lock().expect("state");
+        viewed_community_id(&inner)
+    };
+    let live = community_id(app);
+    if viewed.as_ref() != live.as_ref() {
+        let Some(viewed_id) = viewed else {
+            return Err("Entre ou crie uma comunidade primeiro.".into());
+        };
+        let session = {
+            let guard = state.store.lock().expect("store");
+            guard
+                .as_ref()
+                .and_then(|store| store.load_session(&viewed_id))
+                .ok_or_else(|| "comunidade nao encontrada".to_string())?
+        };
+        let channel = if session.text_channels.iter().any(|c| c == &channel) {
+            channel
+        } else {
+            "general".into()
+        };
+        let inner = state.inner.lock().expect("state");
+        let plain = ChatPlain {
+            channel: channel.clone(),
+            text: trimmed.into(),
+            ts: now_ms(),
+        };
+        let mut wire = seal_chat(&inner.identity, &session.community.live_key, &plain)?;
+        wire.community_id = session.community.id.clone();
+        let sender = inner.identity.public_hex();
+        drop(inner);
+        let json = serde_json::to_string(&wire).map_err(|e| e.to_string())?;
+        remember_outbox(&state, &json);
+        fanout(&state, &json, None);
+        emit_and_store_message(
+            app,
+            UiMessage {
+                sender,
+                text: trimmed.into(),
+                ts: plain.ts,
+                channel,
+                is_self: true,
+                community_id: session.community.id,
+            },
+        );
+        nudge_outbox(app.clone());
+        return Ok(());
+    }
     let (wire, sender, ts, channel) = {
         let inner = state.inner.lock().expect("state");
         let Some(community) = inner.community.as_ref() else {
@@ -1900,10 +2839,12 @@ pub fn send_chat(app: &AppHandle, text: &str, channel: &str) -> Result<(), Strin
             text: trimmed.into(),
             ts: now_ms(),
         };
-        let wire = seal_chat(&inner.identity, &community.live_key, &plain)?;
+        let mut wire = seal_chat(&inner.identity, &community.live_key, &plain)?;
+        wire.community_id = community.id.clone();
         (wire, inner.identity.public_hex(), plain.ts, channel)
     };
     let json = serde_json::to_string(&wire).map_err(|e| e.to_string())?;
+    remember_outbox(&state, &json);
     fanout(&state, &json, None);
     emit_and_store_message(
         app,
@@ -1913,14 +2854,50 @@ pub fn send_chat(app: &AppHandle, text: &str, channel: &str) -> Result<(), Strin
             ts,
             channel,
             is_self: true,
+            community_id: live.unwrap_or_default(),
         },
     );
+    nudge_outbox(app.clone());
     Ok(())
 }
 
 pub fn add_room(app: &AppHandle, kind: &str, name: &str) -> Result<(), String> {
     let slug = slug_name(name);
     let state = state_of(app);
+    let (live, viewed) = {
+        let inner = state.inner.lock().expect("state");
+        (
+            inner.community.as_ref().map(|c| c.id.clone()),
+            viewed_community_id(&inner),
+        )
+    };
+    if viewed.as_ref() != live.as_ref() {
+        let Some(viewed_id) = viewed else {
+            return Err("Entre ou crie uma comunidade primeiro.".into());
+        };
+        let mut session = {
+            let guard = state.store.lock().expect("store");
+            guard
+                .as_ref()
+                .and_then(|store| store.load_session(&viewed_id))
+                .ok_or_else(|| "comunidade nao encontrada".to_string())?
+        };
+        if kind == "call" {
+            if !session.call_rooms.iter().any(|c| c == &slug) {
+                session.call_rooms.push(slug);
+            }
+        } else if slug != "general" && !session.text_channels.iter().any(|c| c == &slug) {
+            session.text_channels.push(slug);
+        }
+        {
+            let guard = state.store.lock().expect("store");
+            if let Some(store) = guard.as_ref() {
+                store.write_session(&session)?;
+            }
+        }
+        emit_state(app);
+        return Ok(());
+    }
     {
         let mut inner = state.inner.lock().expect("state");
         if inner.community.is_none() {
@@ -1941,18 +2918,43 @@ pub fn add_room(app: &AppHandle, kind: &str, name: &str) -> Result<(), String> {
     fanout(&state, &json, None);
     persist_session(app);
     emit_state(app);
+    // Remotes (especially MQTT relay) may still be reconnecting; retry so peers
+    // that missed the first fanout still learn the new room.
+    nudge_layout_sync(app.clone());
     Ok(())
 }
 
 pub fn join_call(app: &AppHandle, room: &str) -> Result<(), String> {
     let room = slug_name(room);
     let state = state_of(app);
-    let pk = {
+    let viewed = {
+        let inner = state.inner.lock().expect("state");
+        viewed_community_id(&inner)
+    };
+    let live = community_id(app);
+    if viewed.as_ref() != live.as_ref() {
+        let Some(viewed_id) = viewed else {
+            return Err("Entre ou crie uma comunidade primeiro.".into());
+        };
+        let _ = clear_own_voice(app);
+        persist_session(app);
+        let session = {
+            let guard = state.store.lock().expect("store");
+            guard
+                .as_ref()
+                .and_then(|store| store.load_session(&viewed_id))
+                .ok_or_else(|| "comunidade nao encontrada".to_string())?
+        };
+        state.relay_gen.fetch_add(1, Ordering::SeqCst);
+        activate_loaded(app, session, true);
+    }
+    let (pk, room_added) = {
         let mut inner = state.inner.lock().expect("state");
         if inner.community.is_none() {
             return Err("Entre ou crie uma comunidade primeiro.".into());
         }
-        if !inner.call_rooms.iter().any(|c| c == &room) {
+        let room_added = !inner.call_rooms.iter().any(|c| c == &room);
+        if room_added {
             inner.call_rooms.push(room.clone());
         }
         let pk = inner.identity.public_hex();
@@ -1961,8 +2963,12 @@ pub fn join_call(app: &AppHandle, room: &str) -> Result<(), String> {
         }
         inner.voice.entry(room.clone()).or_default().insert(pk.clone());
         normalize_voice(&mut inner);
-        pk
+        (pk, room_added)
     };
+    if room_added {
+        fanout(&state, &layout_json(&state), None);
+        nudge_layout_sync(app.clone());
+    }
     let json = serde_json::json!({
         "type": "voice",
         "room": room,
@@ -1983,6 +2989,16 @@ pub fn join_call(app: &AppHandle, room: &str) -> Result<(), String> {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let state = state_of(&app2);
+        let still_here = {
+            let inner = state.inner.lock().expect("state");
+            inner
+                .voice
+                .get(&room2)
+                .is_some_and(|people| people.contains(&pk2))
+        };
+        if !still_here {
+            return;
+        }
         let retry = serde_json::json!({
             "type": "voice",
             "room": room2,
@@ -2004,6 +3020,7 @@ pub fn publish_presence(
     muted: bool,
     deafened: bool,
     status: Option<&str>,
+    sharing_screen: Option<bool>,
 ) -> Result<(), String> {
     let state = state_of(app);
     {
@@ -2013,6 +3030,9 @@ pub fn publish_presence(
         if let Some(status) = status {
             inner.status = normalize_status(status);
         }
+        if let Some(sharing) = sharing_screen {
+            inner.sharing_screen = sharing;
+        }
     }
     let json = presence_json(&state);
     fanout(&state, &json, None);
@@ -2020,11 +3040,12 @@ pub fn publish_presence(
     Ok(())
 }
 
-pub fn leave_call(app: &AppHandle) -> Result<(), String> {
+fn clear_own_voice(app: &AppHandle) -> Result<(), String> {
     let state = state_of(app);
     let (pk, rooms) = {
         let mut inner = state.inner.lock().expect("state");
         let pk = inner.identity.public_hex();
+        inner.sharing_screen = false;
         let rooms: Vec<String> = inner
             .voice
             .iter()
@@ -2034,27 +3055,91 @@ pub fn leave_call(app: &AppHandle) -> Result<(), String> {
         for people in inner.voice.values_mut() {
             people.remove(&pk);
         }
+        normalize_voice(&mut inner);
         (pk, rooms)
     };
-    for room in rooms {
-        let json = serde_json::json!({
-            "type": "voice",
-            "room": room,
-            "action": "leave",
-            "publicKey": pk,
-        })
-        .to_string();
-        fanout(&state, &json, None);
+    for room in &rooms {
+        fanout(&state, &voice_leave_json(room, &pk), None);
     }
+    fanout(&state, &voice_json(&state), None);
+    fanout(&state, &presence_json(&state), None);
     emit_state(app);
+    if rooms.is_empty() {
+        return Ok(());
+    }
+    let app2 = app.clone();
+    let rooms2 = rooms.clone();
+    let pk2 = pk.clone();
+    tauri::async_runtime::spawn(async move {
+        for delay in [400u64, 1200, 2500] {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            let state = state_of(&app2);
+            let still_gone = {
+                let inner = state.inner.lock().expect("state");
+                !inner.voice.values().any(|people| people.contains(&pk2))
+            };
+            if !still_gone {
+                return;
+            }
+            for room in &rooms2 {
+                fanout(&state, &voice_leave_json(room, &pk2), None);
+            }
+            fanout(&state, &voice_json(&state), None);
+        }
+    });
+    Ok(())
+}
+
+pub fn leave_call(app: &AppHandle) -> Result<(), String> {
+    clear_own_voice(app)?;
+    let state = state_of(app);
+    let viewed = {
+        let inner = state.inner.lock().expect("state");
+        viewed_community_id(&inner)
+    };
+    let live = community_id(app);
+    if viewed.as_ref() != live.as_ref() {
+        if let Some(viewed_id) = viewed {
+            persist_session(app);
+            let session = {
+                let guard = state.store.lock().expect("store");
+                guard.as_ref().and_then(|store| store.load_session(&viewed_id))
+            };
+            if let Some(session) = session {
+                state.relay_gen.fetch_add(1, Ordering::SeqCst);
+                activate_loaded(app, session, true);
+            }
+        }
+    }
     Ok(())
 }
 
 pub fn leave_community(app: &AppHandle) {
     let state = state_of(app);
+    let (live_id, viewed_id, in_call) = {
+        let inner = state.inner.lock().expect("state");
+        (
+            inner.community.as_ref().map(|c| c.id.clone()),
+            viewed_community_id(&inner),
+            seated_in_call(&inner),
+        )
+    };
+    let Some(leaving_id) = viewed_id else {
+        return;
+    };
+    if in_call && live_id.as_deref() != Some(leaving_id.as_str()) {
+        clear_stored_community(app, &leaving_id);
+        {
+            let mut inner = state.inner.lock().expect("state");
+            inner.viewed_id = None;
+        }
+        emit_state(app);
+        return;
+    }
     let leaves = {
         let mut inner = state.inner.lock().expect("state");
         inner.status = "offline".into();
+        inner.sharing_screen = false;
         let pk = inner.identity.public_hex();
         drop_from_voice(&mut inner, &pk)
             .into_iter()
@@ -2064,23 +3149,35 @@ pub fn leave_community(app: &AppHandle) {
     fanout(&state, &presence_json(&state), None);
     fanout_voice_leaves(&state, &leaves);
     state.relay_gen.fetch_add(1, Ordering::SeqCst);
+    clear_stored_community(app, &leaving_id);
+    let next = {
+        let guard = state.store.lock().expect("store");
+        guard.as_ref().and_then(|store| {
+            let mut list = store.list_communities();
+            list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            list.into_iter()
+                .next()
+                .and_then(|c| store.load_session(&c.id))
+        })
+    };
+    if let Some(session) = next {
+        activate_loaded(app, session, true);
+        let mut inner = state.inner.lock().expect("state");
+        inner.status = "online".into();
+        return;
+    }
     {
         let mut inner = state.inner.lock().expect("state");
-        inner.community = None;
-        inner.invite_peers.clear();
-        inner.known_peer_urls.clear();
-        reset_rooms(&mut inner);
-        inner.text_channels.clear();
-        inner.profiles.clear();
-        inner.last_seen.clear();
+        unload_community(&mut inner);
         inner.status = "online".into();
-        inner.seeded.clear();
-        inner.seeding.clear();
-        inner.archive_messages = 0;
-        inner.archive_bytes = 0;
     }
-    clear_stored_session(app);
-    state.remotes.lock().expect("remotes").clear();
+    {
+        let guard = state.store.lock().expect("store");
+        if let Some(store) = guard.as_ref() {
+            let _ = store.clear_active();
+        }
+    }
+    bump_links(&state);
     emit_state(app);
 }
 
@@ -2151,7 +3248,9 @@ mod tests {
             display_name: "eu".into(),
             avatar: String::new(),
             community: None,
+            viewed_id: None,
             invite_peers: Vec::new(),
+            relays: Vec::new(),
             listen_url: String::new(),
             listen_urls: Vec::new(),
             listen_port: 0,
@@ -2159,9 +3258,12 @@ mod tests {
             text_channels: vec!["general".into()],
             call_rooms: Vec::new(),
             voice: HashMap::new(),
+            voice_left: HashMap::new(),
+            voice_joined: HashMap::new(),
             profiles: HashMap::new(),
             muted: false,
             deafened: false,
+            sharing_screen: false,
             status: "online".into(),
             last_seen: HashMap::new(),
             archive_messages: 0,
@@ -2213,7 +3315,7 @@ mod tests {
             .voice
             .insert("lobby".into(), HashSet::from(["alice".into()]));
         let frame = serde_json::json!({ "rooms": { "lobby": [] } });
-        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap());
+        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap(), "");
         assert!(inner.voice.get("lobby").unwrap().contains("alice"));
     }
 
@@ -2225,7 +3327,7 @@ mod tests {
             .insert("lobby".into(), HashSet::from(["alice".into()]));
         inner.last_seen.insert("bob".into(), now_ms());
         let frame = serde_json::json!({ "rooms": { "Lobby": ["bob"] } });
-        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap());
+        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap(), "");
         let people = inner.voice.get("lobby").unwrap();
         assert!(people.contains("alice"));
         assert!(people.contains("bob"));
@@ -2253,6 +3355,47 @@ mod tests {
     }
 
     #[test]
+    fn voice_leave_is_not_undone_by_stale_snapshot() {
+        let mut inner = sample_inner();
+        inner
+            .voice
+            .insert("lobby".into(), HashSet::from(["alice".into(), "bob".into()]));
+        apply_voice_action(&mut inner, "lobby", "leave", "alice");
+        assert!(!inner.voice.get("lobby").unwrap().contains("alice"));
+        let frame = serde_json::json!({ "rooms": { "lobby": ["alice", "bob"] } });
+        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap(), "bob");
+        assert!(!inner.voice.get("lobby").unwrap().contains("alice"));
+        assert!(inner.voice.get("lobby").unwrap().contains("bob"));
+        apply_voice_action(&mut inner, "lobby", "join", "alice");
+        assert!(inner.voice.get("lobby").unwrap().contains("alice"));
+    }
+
+    #[test]
+    fn voice_snapshot_from_peer_in_room_drops_leavers() {
+        let mut inner = sample_inner();
+        inner.voice.insert(
+            "lobby".into(),
+            HashSet::from(["alice".into(), "bob".into(), "carol".into()]),
+        );
+        let frame = serde_json::json!({ "rooms": { "lobby": ["bob", "carol"] } });
+        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap(), "bob");
+        let people = inner.voice.get("lobby").unwrap();
+        assert!(!people.contains("alice"));
+        assert!(people.contains("bob"));
+        assert!(people.contains("carol"));
+    }
+
+    #[test]
+    fn voice_snapshot_keeps_recent_joiner_missing_from_peer() {
+        let mut inner = sample_inner();
+        apply_voice_action(&mut inner, "lobby", "join", "alice");
+        apply_voice_action(&mut inner, "lobby", "join", "bob");
+        let frame = serde_json::json!({ "rooms": { "lobby": ["bob"] } });
+        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap(), "bob");
+        assert!(inner.voice.get("lobby").unwrap().contains("alice"));
+    }
+
+    #[test]
     fn json_str_reads_nested_presence_names() {
         let frame = serde_json::json!({
             "publicKey": "aa",
@@ -2270,6 +3413,87 @@ mod tests {
             false,
         );
         assert_eq!(inner.profiles.get("aa").unwrap().display_name, "Ana");
+    }
+
+    #[test]
+    fn presence_carries_screen_share_and_keeps_it_unless_set() {
+        let mut inner = sample_inner();
+        inner
+            .voice
+            .insert("lobby".into(), HashSet::from(["aa".into()]));
+        apply_presence(
+            &mut inner,
+            &serde_json::json!({
+                "publicKey": "aa",
+                "displayName": "Ana",
+                "sharingScreen": true,
+            }),
+            false,
+        );
+        assert!(inner.profiles.get("aa").unwrap().sharing_screen);
+        apply_presence(
+            &mut inner,
+            &serde_json::json!({
+                "publicKey": "aa",
+                "displayName": "Ana",
+            }),
+            false,
+        );
+        assert!(inner.profiles.get("aa").unwrap().sharing_screen);
+        apply_presence(
+            &mut inner,
+            &serde_json::json!({
+                "publicKey": "aa",
+                "sharingScreen": false,
+            }),
+            false,
+        );
+        assert!(!inner.profiles.get("aa").unwrap().sharing_screen);
+    }
+
+    #[test]
+    fn sharing_screen_ignored_when_peer_not_in_voice() {
+        let mut inner = sample_inner();
+        apply_presence(
+            &mut inner,
+            &serde_json::json!({
+                "publicKey": "aa",
+                "displayName": "Ana",
+                "sharingScreen": true,
+            }),
+            false,
+        );
+        assert!(!inner.profiles.get("aa").unwrap().sharing_screen);
+    }
+
+    #[test]
+    fn leaving_voice_clears_sharing_screen() {
+        let mut inner = sample_inner();
+        inner
+            .voice
+            .insert("lobby".into(), HashSet::from(["aa".into()]));
+        inner.profiles.insert(
+            "aa".into(),
+            PeerProfile {
+                display_name: "Ana".into(),
+                sharing_screen: true,
+                ..PeerProfile::default()
+            },
+        );
+        drop_from_voice(&mut inner, "aa");
+        assert!(!inner.profiles.get("aa").unwrap().sharing_screen);
+        assert!(!peer_in_voice(&inner, "aa"));
+    }
+
+    #[test]
+    fn voice_state_from_peer_overrides_leave_hold() {
+        let mut inner = sample_inner();
+        mark_voice_left(&mut inner, "bob");
+        assert!(voice_left_held(&inner, "bob", now_ms()));
+        let frame = serde_json::json!({ "rooms": { "lobby": ["bob"] } });
+        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap(), "bob");
+        assert!(inner.voice.get("lobby").unwrap().contains("bob"));
+        assert!(!voice_left_held(&inner, "bob", now_ms()));
     }
 
     #[test]
@@ -2332,7 +3556,23 @@ mod tests {
     }
 
     #[test]
-    fn voice_state_does_not_readd_offline_peer() {
+    fn voice_state_does_not_duplicate_across_rooms() {
+        let mut inner = sample_inner();
+        inner.last_seen.insert("alice".into(), now_ms());
+        inner
+            .voice
+            .insert("currall".into(), HashSet::from(["alice".into()]));
+        let frame = serde_json::json!({ "rooms": { "sala": ["alice"] } });
+        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap(), "");
+        assert!(inner.voice.get("currall").unwrap().contains("alice"));
+        assert!(!inner
+            .voice
+            .get("sala")
+            .is_some_and(|people| people.contains("alice")));
+    }
+
+    #[test]
+    fn voice_state_seats_offline_looking_peer_once() {
         let mut inner = sample_inner();
         inner.profiles.insert(
             "aa".into(),
@@ -2346,13 +3586,29 @@ mod tests {
             .voice
             .insert("lobby".into(), HashSet::from(["bb".into()]));
         let frame = serde_json::json!({ "rooms": { "lobby": ["aa", "bb"] } });
-        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap());
-        assert!(!inner.voice.get("lobby").unwrap().contains("aa"));
+        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap(), "");
+        assert!(inner.voice.get("lobby").unwrap().contains("aa"));
         assert!(inner.voice.get("lobby").unwrap().contains("bb"));
     }
 
     #[test]
-    fn explicit_offline_presence_drops_from_call() {
+    fn remote_voice_cannot_put_self_back_in_call() {
+        let mut inner = sample_inner();
+        let me = inner.identity.public_hex();
+        inner
+            .voice
+            .insert("lobby".into(), HashSet::from(["bb".into()]));
+        let frame = serde_json::json!({ "rooms": { "lobby": [me.clone(), "bb"] } });
+        merge_voice_rooms(&mut inner, frame["rooms"].as_object().unwrap(), "");
+        assert!(!inner.voice.get("lobby").unwrap().contains(&me));
+        apply_voice_action(&mut inner, "lobby", "join", &me);
+        assert!(!inner.voice.get("lobby").unwrap().contains(&me));
+        apply_voice_action(&mut inner, "lobby", "leave", "bb");
+        assert!(!inner.voice.get("lobby").unwrap().contains("bb"));
+    }
+
+    #[test]
+    fn explicit_offline_presence_keeps_call_seat() {
         let mut inner = sample_inner();
         inner
             .voice
@@ -2366,12 +3622,8 @@ mod tests {
             }),
             false,
         );
-        assert_eq!(rooms, vec!["lobby".to_string()]);
-        assert!(inner
-            .voice
-            .get("lobby")
-            .map(|people| !people.contains("aa"))
-            .unwrap_or(true));
+        assert!(rooms.is_empty());
+        assert!(inner.voice.get("lobby").unwrap().contains("aa"));
     }
 
     #[test]
@@ -2479,6 +3731,23 @@ mod tests {
         assert!(!should_dial("ws://26.12.34.56:7340"));
         assert!(!should_dial("ws://192.168.137.1:7340"));
         assert!(should_dial("ws://127.0.0.1:7340"));
+        assert!(should_dial("ws://192.168.1.9:7340"));
+        assert!(should_dial("ws://203.0.113.10:7340"));
+    }
+
+    #[test]
+    fn invite_omits_loopback_so_friends_do_not_dial_themselves() {
+        let mut inner = sample_inner();
+        inner.listen_port = 7340;
+        inner.listen_url = "ws://127.0.0.1:7340".into();
+        inner.listen_urls = vec![
+            "ws://127.0.0.1:7340".into(),
+            "ws://192.168.100.2:7340".into(),
+        ];
+        assert_eq!(
+            invite_peer_list(&inner),
+            vec!["ws://192.168.100.2:7340".to_string()]
+        );
     }
 
     #[test]
@@ -2486,6 +3755,130 @@ mod tests {
         assert_eq!(
             parse_ws("ws://[2001:db8::1]:7340"),
             Some(("2001:db8::1".into(), 7340))
+        );
+    }
+
+    #[test]
+    fn prefer_lan_urls_over_loopback_invites() {
+        let urls = prefer_non_loopback(vec![
+            "ws://127.0.0.1:7340".into(),
+            "ws://192.168.100.2:7340".into(),
+            "ws://localhost:7340".into(),
+        ]);
+        assert_eq!(urls, vec!["ws://192.168.100.2:7340".to_string()]);
+    }
+
+    #[test]
+    fn loopback_invite_kept_when_it_is_the_only_option() {
+        let urls = prefer_non_loopback(vec!["ws://127.0.0.1:7340".into()]);
+        assert_eq!(urls, vec!["ws://127.0.0.1:7340".to_string()]);
+    }
+
+    #[test]
+    fn relay_is_not_a_direct_peer() {
+        assert!(!is_direct_remote_key("relay"));
+        assert!(!is_direct_remote_key("relay:0"));
+        assert!(!is_direct_remote_key("pending:3"));
+        assert!(is_direct_remote_key("ws://192.168.100.2:7340"));
+    }
+
+    #[test]
+    fn mqtt_will_is_ignored_while_peer_was_just_seen() {
+        let mut inner = sample_inner();
+        inner.last_seen.insert("aa".into(), now_ms());
+        assert!(ignore_relay_offline(&inner, "aa", true, Some("offline")));
+        assert!(!ignore_relay_offline(&inner, "aa", false, Some("offline")));
+        assert!(!ignore_relay_offline(&inner, "aa", true, Some("online")));
+        inner.last_seen.insert("aa".into(), 1);
+        assert!(!ignore_relay_offline(&inner, "aa", true, Some("offline")));
+    }
+
+    #[test]
+    fn history_request_frame_asks_for_seed() {
+        let inner = sample_inner();
+        let frame = serde_json::json!({
+            "type": "history-request",
+            "publicKey": inner.identity.public_hex(),
+            "historyCount": inner.archive_messages,
+        });
+        assert_eq!(frame["type"], "history-request");
+        assert_eq!(frame["historyCount"], 0);
+    }
+
+    #[test]
+    fn presence_heartbeats_are_not_byte_identical() {
+        let inner = sample_inner();
+        let a = presence_frame(&inner, false);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = presence_frame(&inner, false);
+        assert_ne!(a, b, "presence frames need a changing ts so already_seen keeps heartbeats");
+        let va: serde_json::Value = serde_json::from_str(&a).unwrap();
+        let vb: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert!(va.get("ts").and_then(|v| v.as_i64()).unwrap() > 0);
+        assert_ne!(va.get("ts"), vb.get("ts"));
+    }
+
+    #[test]
+    fn layout_advertise_includes_fresh_ts() {
+        let state = AppState::new();
+        {
+            let mut inner = state.inner.lock().expect("state");
+            *inner = sample_inner();
+            inner.call_rooms.push("sala-1".into());
+        }
+        let a = layout_json(&state);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = layout_json(&state);
+        assert_ne!(a, b);
+        let va: serde_json::Value = serde_json::from_str(&a).unwrap();
+        assert_eq!(va["type"], "layout");
+        assert!(va["callRooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x.as_str() == Some("sala-1")));
+        assert!(va.get("ts").and_then(|v| v.as_i64()).unwrap() > 0);
+    }
+
+    #[test]
+    fn stamps_and_matches_community_id() {
+        let state = AppState::new();
+        let id = {
+            let mut inner = state.inner.lock().expect("state");
+            *inner = sample_inner();
+            let community = create_community(&inner.identity, "alpha");
+            let id = community.id.clone();
+            inner.community = Some(community);
+            id
+        };
+        let raw = layout_json(&state);
+        let stamped = stamp_community(&state, &raw);
+        let value: serde_json::Value = serde_json::from_str(&stamped).unwrap();
+        assert_eq!(
+            value.get("communityId").and_then(|v| v.as_str()),
+            Some(id.as_str())
+        );
+        assert!(frame_matches_community(&value, &id));
+        assert!(!frame_matches_community(&value, "other"));
+        let legacy = serde_json::json!({ "type": "layout" });
+        assert!(frame_matches_community(&legacy, &id));
+    }
+
+    #[test]
+    fn viewed_id_keeps_the_live_community_while_in_a_call() {
+        let mut inner = sample_inner();
+        let community = create_community(&inner.identity, "live");
+        let live_id = community.id.clone();
+        inner.community = Some(community);
+        inner
+            .voice
+            .insert("lobby".into(), HashSet::from([inner.identity.public_hex()]));
+        inner.viewed_id = Some("viewed".into());
+        assert!(seated_in_call(&inner));
+        assert_eq!(viewed_community_id(&inner).as_deref(), Some("viewed"));
+        assert_eq!(
+            inner.community.as_ref().map(|c| c.id.as_str()),
+            Some(live_id.as_str())
         );
     }
 

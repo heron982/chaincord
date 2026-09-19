@@ -160,13 +160,13 @@ export function UserPanel({
   onMic: () => void;
   onDeafen: () => void;
   onPresence: (status: "online" | "away" | "busy") => void;
-  onSettings: () => void;
+  onSettings: (tab?: "profile" | "audio") => void;
 }) {
   const [open, setOpen] = useState(false);
   const label = inVoice && presence !== "busy" ? "Em voz" : presenceLabel(presence);
   return (
     <div className="user-panel">
-      <button type="button" className="user-chip" onClick={onSettings} title="Meu perfil">
+      <button type="button" className="user-chip" onClick={() => onSettings()} title="Meu perfil">
         <span className="user-avatar">
           {avatar ? <img src={avatar} alt="" /> : <span>{name.slice(0, 1).toUpperCase()}</span>}
           <i className={`presence-dot ${presence}`} />
@@ -217,20 +217,28 @@ export function UserPanel({
         <button
           type="button"
           className={micMuted ? "off" : ""}
-          title={micMuted ? "Ativar microfone" : "Silenciar microfone"}
+          title={micMuted ? "Ativar microfone · clique direito para aparelhos" : "Silenciar microfone · clique direito para aparelhos"}
           onClick={onMic}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            onSettings("audio");
+          }}
         >
           <IconMic muted={micMuted} />
         </button>
         <button
           type="button"
           className={deafened ? "off" : ""}
-          title={deafened ? "Ativar som" : "Silenciar som"}
+          title={deafened ? "Ativar som · clique direito para aparelhos" : "Silenciar som · clique direito para aparelhos"}
           onClick={onDeafen}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            onSettings("audio");
+          }}
         >
           <IconHead muted={deafened} />
         </button>
-        <button type="button" title="Configurações do usuário" onClick={onSettings}>
+        <button type="button" title="Configurações do usuário" onClick={() => onSettings()}>
           <IconGear />
         </button>
       </div>

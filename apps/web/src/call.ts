@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import {
+  backendAppendLog,
   backendRtcPushFrame,
   backendRtcShareScreen,
   backendRtcSignal,
@@ -10,16 +11,29 @@ import {
 } from "./backend";
 import {
   callPathMode,
+  callTrackIsScreen,
+  callForwardPeers,
+  callPrimaryCount,
+  callSlotPeer,
+  callSlotScreen,
+  callWantedMLines,
+  callWantedPeers,
+  answerMatchesLocalOffer,
   canPublishLocalSdp,
+  shouldResendCallAnswer,
   createRtcPeerConnection,
+  holdCallHub,
   iceTraceLevel,
   iceTraceText,
+  ignoreStaleCallBye,
+  ignoreStaleCallSess,
   isWebKitEngine,
-  pcTraceText,
   pickCallTransceivers,
   rtcPeerConfigs,
   rtcPolite,
+  pcTraceText,
   shouldHealSend,
+  trackLooksLive,
   type CallPathMode,
 } from "./logic";
 
@@ -31,6 +45,8 @@ export type RtcFrame = {
   kind: "offer" | "answer" | "ice" | "bye";
   sdp?: string;
   candidate?: RTCIceCandidateInit | null;
+  ts?: number;
+  sess?: string;
 };
 
 export type RemoteMedia = {
@@ -88,10 +104,6 @@ const iceServers: RTCIceServer[] = [
   },
 ];
 
-function trackLive(track: MediaStreamTrack | null | undefined) {
-  return Boolean(track && track.readyState === "live" && track.enabled && !track.muted);
-}
-
 function sleep(ms: number) {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, ms);
@@ -121,6 +133,7 @@ export class CallNet {
   private pcSeen = new Map<string, string>();
   private heard = new Set<string>();
   private pathMode: CallPathMode = "1:1";
+  private hubHoldUntil = 0;
   private rtcFailed: string | null = null;
   private traceSeq = 0;
   private native = rtcPeerConnectionMissing();
@@ -136,6 +149,17 @@ export class CallNet {
   private nativeSeen = new Set<string>();
   private remoteSinks = new Map<string, HTMLVideoElement>();
   private seenScreen = new Set<string>();
+  private roster: string[] = [];
+  private hub: string | null = null;
+  private offerRetry = new Map<string, number>();
+  private peerDropTimer = new Map<string, number>();
+  private wantPeers = new Set<string>();
+  private iceStuckTimer = new Map<string, number>();
+  private peerSigAt = new Map<string, number>();
+  private peerSess = new Map<string, string>();
+  private readonly sess = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  private fwdSenders = new Map<string, RTCRtpSender>();
+  private inbound = new Map<string, { audio: MediaStreamTrack | null; cam: MediaStreamTrack | null; screen: MediaStreamTrack | null }>();
 
   constructor(
     private readonly me: string,
@@ -158,9 +182,6 @@ export class CallNet {
   private async bootNative() {
     try {
       this.nativeUnsub.push(
-        await listen<CallTrace>("ui-call-trace", (e) => this.onLog(e.payload)),
-      );
-      this.nativeUnsub.push(
         await listen<CallLink>("ui-call-link", (e) => this.onLink(e.payload)),
       );
       this.nativeUnsub.push(
@@ -179,7 +200,17 @@ export class CallNet {
   }
 
   private currentMode(): CallPathMode {
-    return callPathMode(this.pcs.size);
+    const others = Math.max(0, this.roster.length - 1);
+    return callPathMode(others, Boolean(this.hub && others >= 2));
+  }
+
+  private layoutExtras(remote: string): string[] {
+    if (!this.hub || this.roster.length < 3) return [];
+    return callForwardPeers(this.hub, remote, this.roster);
+  }
+
+  private fwdKey(to: string, from: string, slot: "a" | "c" | "s") {
+    return `${to}|${from}|${slot}`;
   }
 
   private noteMode() {
@@ -192,14 +223,22 @@ export class CallNet {
 
   private trace(event: string, level: CallTrace["level"], peer: string | null = null) {
     this.traceSeq += 1;
-    this.onLog({
+    const line: CallTrace = {
       id: this.traceSeq,
       t: Date.now(),
       mode: this.currentMode(),
       peer,
       event,
       level,
-    });
+    };
+    this.onLog(line);
+    void backendAppendLog({
+      t: line.t,
+      mode: line.mode,
+      peer: line.peer,
+      event: line.event,
+      level: line.level,
+    }).catch(() => undefined);
   }
 
   setCamera(stream: MediaStream | null) {
@@ -366,21 +405,44 @@ export class CallNet {
     return btoa(bin);
   }
 
-  sync(peers: string[]) {
+  sync(peers: string[], hub: string | null = null) {
     if (this.stopped) return;
+    const others = peers.filter((p) => p && p !== this.me);
+    this.roster = [...new Set([this.me, ...others])];
+    const now = Date.now();
+    // Elect immediately at 3+; holdCallHub absorbs brief 3→2 roster blips.
+    const elected = this.roster.length >= 3 ? hub : null;
+    const held = holdCallHub(
+      this.hub,
+      elected,
+      this.roster.length,
+      this.hubHoldUntil,
+      now,
+    );
+    this.hubHoldUntil = held.holdUntil;
+    const nextHub = held.hub;
     if (this.native) {
       void this.nativeReady
-        .then(() => backendRtcSync(peers.filter((p) => p && p !== this.me)))
+        .then(() => backendRtcSync(others, nextHub))
         .catch((err) => {
           this.trace(`neste app: ${String(err)}`, "err");
         });
+      this.hub = nextHub;
+      this.noteMode();
       return;
     }
-    const want = new Set(peers.filter((p) => p && p !== this.me));
+    if (this.hub !== nextHub) {
+      this.hub = nextHub;
+      this.trace(nextHub ? `hub ${nextHub.slice(0, 8)}` : "sem hub", "info", nextHub);
+    }
+    const want = new Set(callWantedPeers(this.me, this.roster, this.hub));
+    this.wantPeers = want;
     for (const id of [...this.pcs.keys()]) {
-      if (!want.has(id)) this.drop(id);
+      if (!want.has(id)) this.armPeerDrop(id);
+      else this.cancelPeerDrop(id);
     }
     for (const id of want) {
+      this.cancelPeerDrop(id);
       if (!this.pcs.has(id)) {
         const polite = rtcPolite(this.me, id);
         try {
@@ -398,10 +460,41 @@ export class CallNet {
       }
     }
     this.noteMode();
+    for (const id of want) {
+      const pc = this.pcs.get(id);
+      if (!pc) continue;
+      if (rtcPolite(this.me, id)) {
+        this.bindSenders(pc, id);
+        this.bindFwd(pc, id);
+        continue;
+      }
+      // Never add m-lines while an offer/answer is in flight — that desyncs SDP and
+      // makes the next answer fail with "m-lines order doesn't match".
+      if (pc.signalingState !== "stable") continue;
+      const before = pc.getTransceivers().filter((t) => t.direction !== "stopped").length;
+      this.ensureMLines(pc, id);
+      const after = pc.getTransceivers().filter((t) => t.direction !== "stopped").length;
+      if (after > before) {
+        this.trace("layout hub cresceu · renegociando", "info", id);
+        void this.enqueue(id, () => this.offerNow(id));
+      }
+    }
+    this.replayInbound();
   }
 
   async handle(frame: RtcFrame) {
     if (this.stopped) return;
+    if (frame.room !== this.room) return;
+    if (frame.from === this.me) return;
+    if (frame.to !== this.me) return;
+    if (
+      this.hub &&
+      this.roster.length >= 3 &&
+      this.me !== this.hub &&
+      frame.from !== this.hub
+    ) {
+      return;
+    }
     if (this.native) {
       await this.nativeReady;
       await backendRtcSignal(frame).catch((err) => {
@@ -409,19 +502,36 @@ export class CallNet {
       });
       return;
     }
-    if (frame.room !== this.room) return;
-    if (frame.from === this.me) return;
-    if (frame.to !== this.me) return;
     if (frame.kind === "bye") {
+      if (
+        ignoreStaleCallSess(frame.sess, this.peerSess.get(frame.from)) ||
+        ignoreStaleCallBye(frame.ts, this.peerSigAt.get(frame.from) ?? 0)
+      ) {
+        this.trace("bye atrasado", "info", frame.from);
+        return;
+      }
+      // Peer remounted CallNet and spammed bye while still seated — ignore.
+      if (this.wantPeers.has(frame.from) || this.roster.includes(frame.from)) {
+        this.trace("bye ignorado (ainda na sala)", "info", frame.from);
+        return;
+      }
       this.drop(frame.from, true);
       return;
+    }
+    if (frame.sess) this.peerSess.set(frame.from, frame.sess);
+    if (frame.ts && frame.ts >= (this.peerSigAt.get(frame.from) ?? 0)) {
+      this.peerSigAt.set(frame.from, frame.ts);
     }
     await this.enqueue(frame.from, () => this.handleOne(frame));
   }
 
-  stop() {
+  stop(quiet = false) {
+    if (this.stopped) return;
     this.trace("call encerrada", "info");
     this.stopped = true;
+    for (const peer of [...this.offerRetry.keys()]) this.clearOfferRetry(peer);
+    for (const peer of [...this.peerDropTimer.keys()]) this.cancelPeerDrop(peer);
+    for (const peer of [...this.iceStuckTimer.keys()]) this.clearIceStuck(peer);
     if (this.native) {
       this.stopNativePump();
       for (const unsub of this.nativeUnsub) unsub();
@@ -433,7 +543,7 @@ export class CallNet {
       window.clearInterval(this.timer);
       this.timer = null;
     }
-    for (const id of [...this.pcs.keys()]) this.drop(id);
+    for (const id of [...this.pcs.keys()]) this.drop(id, quiet);
     this.dropAllSinks();
   }
 
@@ -450,10 +560,34 @@ export class CallNet {
 
   private async handleOne(frame: RtcFrame) {
     if (this.stopped) return;
-    const pc = this.pcs.get(frame.from) ?? this.open(frame.from);
+    let pc = this.pcs.get(frame.from);
+    // Stale answer/ICE after drop+remount must not recreate the PC.
+    if (!pc) {
+      if (frame.kind !== "offer") return;
+      pc = this.open(frame.from);
+    }
     const polite = rtcPolite(this.me, frame.from);
+    const stillMine = () => !this.stopped && this.pcs.get(frame.from) === pc;
     try {
       if (frame.kind === "offer" && frame.sdp) {
+        if (
+          shouldResendCallAnswer(
+            pc.remoteDescription?.sdp,
+            frame.sdp,
+            pc.localDescription?.type,
+          )
+        ) {
+          this.emitSig({
+            type: "rtc",
+            room: this.room,
+            from: this.me,
+            to: frame.from,
+            kind: "answer",
+            sdp: pc.localDescription?.sdp,
+          });
+          this.trace("resposta reenviada", "info", frame.from);
+          return;
+        }
         const collision = this.makingOffer.has(frame.from) || pc.signalingState !== "stable";
         if (collision) {
           if (!polite) return;
@@ -462,20 +596,23 @@ export class CallNet {
             await pc.setLocalDescription({ type: "rollback" });
           }
         }
+        if (!stillMine()) return;
         await pc.setRemoteDescription({ type: "offer", sdp: frame.sdp });
         this.trace("oferta recebida", "info", frame.from);
         await this.flushIce(frame.from);
         await this.waitForMic(800);
+        if (!stillMine()) return;
         this.bindSenders(pc, frame.from);
+        this.bindFwd(pc, frame.from);
         this.preferH264IfLinux(pc, frame.sdp);
         await this.pushLocal(frame.from);
+        if (!stillMine()) return;
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await this.pushLocal(frame.from);
-        await this.waitIce(pc, 400);
-        if (this.stopped || this.pcs.get(frame.from) !== pc) return;
+        if (!stillMine()) return;
         if (!canPublishLocalSdp("answer", pc.localDescription?.type)) return;
-        this.send({
+        this.emitSig({
           type: "rtc",
           room: this.room,
           from: this.me,
@@ -486,13 +623,19 @@ export class CallNet {
         this.trace("resposta enviada", "info", frame.from);
         this.ignoreOffer.delete(frame.from);
       } else if (frame.kind === "answer" && frame.sdp) {
-        if (pc.signalingState === "have-local-offer") {
-          await pc.setRemoteDescription({ type: "answer", sdp: frame.sdp });
-          this.trace("resposta recebida", "ok", frame.from);
-          await this.flushIce(frame.from);
-          this.bindSenders(pc, frame.from);
-          await this.pushLocal(frame.from);
+        if (pc.signalingState !== "have-local-offer") return;
+        if (!answerMatchesLocalOffer(pc.localDescription?.sdp, frame.sdp)) {
+          this.trace("resposta atrasada (m-lines)", "info", frame.from);
+          return;
         }
+        await pc.setRemoteDescription({ type: "answer", sdp: frame.sdp });
+        if (!stillMine()) return;
+        this.trace("resposta recebida", "ok", frame.from);
+        this.clearOfferRetry(frame.from);
+        await this.flushIce(frame.from);
+        this.bindSenders(pc, frame.from);
+        this.bindFwd(pc, frame.from);
+        await this.pushLocal(frame.from);
       } else if (frame.kind === "ice") {
         if (!pc.remoteDescription) {
           if (frame.candidate) {
@@ -508,8 +651,8 @@ export class CallNet {
           if (!this.ignoreOffer.has(frame.from)) return;
         }
       }
-    } catch {
-      /* glare / late ice */
+    } catch (err) {
+      this.trace(`sinal rtc: ${String(err)}`, "err", frame.from);
     }
   }
 
@@ -607,8 +750,13 @@ export class CallNet {
     let lost = 0;
     let recv = 0;
     for (const pc of pcs) {
-      if (pc.connectionState === "connected") live += 1;
-      else if (pc.connectionState === "failed") failed += 1;
+      // WebView2 sometimes flips connectionState to "failed" while ICE is still
+      // connected and media is flowing — trust ICE first for the call grade.
+      const ice = pc.iceConnectionState;
+      const conn = pc.connectionState;
+      if (ice === "connected" || ice === "completed" || conn === "connected") live += 1;
+      else if (ice === "failed" || (conn === "failed" && ice !== "checking" && ice !== "connected"))
+        failed += 1;
       else connecting += 1;
       try {
         const stats = await pc.getStats();
@@ -679,7 +827,7 @@ export class CallNet {
 
     pc.onicecandidate = (ev) => {
       if (this.stopped) return;
-      this.send({
+      this.emitSig({
         type: "rtc",
         room: this.room,
         from: this.me,
@@ -706,6 +854,8 @@ export class CallNet {
       if (this.stopped || this.pcs.get(peer) !== pc) return;
       if (rtcPolite(this.me, peer)) return;
       if (pc.signalingState !== "stable") return;
+      // replaceTrack often fires this; only renegotiate when m-line layout changed.
+      if (!this.pcLayoutStale(pc, peer)) return;
       void this.enqueue(peer, () => this.offerNow(peer));
     };
 
@@ -713,22 +863,36 @@ export class CallNet {
       if (!ev.track) return;
       const publish = () => {
         if (this.stopped) return;
+        const xcvrs = [...pc.getTransceivers()].filter((t) => t.direction !== "stopped");
+        const idx = xcvrs.indexOf(ev.transceiver);
+        const extras = this.layoutExtras(peer);
+        const fromPeer = callSlotPeer(idx, peer, extras);
+        const mapped = this.screenXcvr.get(peer);
+        const mappedIdx = mapped ? xcvrs.indexOf(mapped) : -1;
         const isScreen =
-          ev.track.kind === "video" &&
-          (this.screenXcvr.get(peer) === ev.transceiver || ev.transceiver.mid === "2");
-        if (isScreen && ev.track.readyState === "ended") {
-          this.remoteScr.delete(peer);
-          this.dropSink(peer, true);
-          this.seenScreen.delete(peer);
-          this.onRemote({ peer, stream: new MediaStream(), screen: true });
+          extras.length > 0 || this.hub
+            ? callSlotScreen(ev.track.kind, idx)
+            : callTrackIsScreen(
+                ev.track.kind,
+                idx,
+                xcvrs.map((t) => ({ mid: t.mid, kind: this.xcvrKind(t) })),
+                mappedIdx >= 0 ? mappedIdx : null,
+              );
+        if (isScreen && !trackLooksLive(ev.track)) {
+          this.remoteScr.delete(fromPeer);
+          this.dropSink(fromPeer, true);
+          this.seenScreen.delete(fromPeer);
+          this.rememberInbound(fromPeer, true, "video", null);
+          this.forwardTrack(fromPeer, "video", true, null);
+          this.onRemote({ peer: fromPeer, stream: new MediaStream(), screen: true });
           return;
         }
-        if (ev.track.kind === "video") this.attachSink(peer, isScreen, ev.track);
+        if (ev.track.kind === "video") this.attachSink(fromPeer, isScreen, ev.track);
         const map = isScreen ? this.remoteScr : this.remoteCam;
-        let stream = map.get(peer);
+        let stream = map.get(fromPeer);
         if (!stream) {
           stream = new MediaStream();
-          map.set(peer, stream);
+          map.set(fromPeer, stream);
         }
         const sameKind =
           ev.track.kind === "audio" ? stream.getAudioTracks() : stream.getVideoTracks();
@@ -736,15 +900,21 @@ export class CallNet {
           if (old.id !== ev.track.id) stream.removeTrack(old);
         }
         if (!stream.getTracks().some((t) => t.id === ev.track.id)) stream.addTrack(ev.track);
-        if (ev.track.kind === "audio" && !this.heard.has(peer)) {
-          this.heard.add(peer);
-          this.trace("áudio chegou", "ok", peer);
+        if (ev.track.kind === "audio" && !this.heard.has(fromPeer)) {
+          this.heard.add(fromPeer);
+          this.trace("áudio chegou", "ok", fromPeer);
         }
-        if (isScreen && trackLive(ev.track) && !this.seenScreen.has(peer)) {
-          this.seenScreen.add(peer);
-          this.trace("tela chegou", "ok", peer);
+        if (isScreen && trackLooksLive(ev.track) && !this.seenScreen.has(fromPeer)) {
+          this.seenScreen.add(fromPeer);
+          this.trace("tela chegou", "ok", fromPeer);
         }
-        this.onRemote({ peer, stream: new MediaStream(stream.getTracks()), screen: isScreen });
+        this.rememberInbound(fromPeer, isScreen, ev.track.kind, ev.track);
+        this.forwardTrack(fromPeer, ev.track.kind, isScreen, ev.track);
+        this.onRemote({
+          peer: fromPeer,
+          stream: new MediaStream(stream.getTracks()),
+          screen: isScreen,
+        });
       };
       ev.track.addEventListener("mute", publish);
       ev.track.addEventListener("unmute", publish);
@@ -757,6 +927,15 @@ export class CallNet {
       const state = pc.connectionState;
       if (this.pcSeen.get(peer) !== state) {
         this.pcSeen.set(peer, state);
+        const ice = pc.iceConnectionState;
+        // Ignore spurious "failed" while ICE is healthy (WebView2 quirk).
+        if (
+          state === "failed" &&
+          (ice === "connected" || ice === "completed" || ice === "checking")
+        ) {
+          this.trace("enlace falhou (ICE segue · mantendo)", "warn", peer);
+          return;
+        }
         const text = pcTraceText(state);
         if (text) {
           const level =
@@ -765,6 +944,11 @@ export class CallNet {
         }
       }
       if (pc.connectionState === "closed") this.onGone(peer);
+      if (pc.connectionState === "failed") {
+        const ice = pc.iceConnectionState;
+        if (ice === "connected" || ice === "completed" || ice === "checking") return;
+        this.maybeReconnect(peer, pc);
+      }
     };
 
     pc.oniceconnectionstatechange = () => {
@@ -778,8 +962,15 @@ export class CallNet {
       }
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
         this.reconnectAt.delete(peer);
+        this.clearOfferRetry(peer);
+        this.clearIceStuck(peer);
         return;
       }
+      if (pc.iceConnectionState === "checking") {
+        this.armIceStuck(peer, pc);
+        return;
+      }
+      this.clearIceStuck(peer);
       if (pc.iceConnectionState === "failed") {
         this.maybeReconnect(peer, pc);
         return;
@@ -787,6 +978,7 @@ export class CallNet {
       if (pc.iceConnectionState === "disconnected") {
         window.setTimeout(() => {
           if (this.stopped || this.pcs.get(peer) !== pc) return;
+          if (pc.signalingState !== "stable") return;
           if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
             this.maybeReconnect(peer, pc);
           }
@@ -801,7 +993,7 @@ export class CallNet {
     const desc = pc.localDescription;
     if (!desc) return;
     if (pc.signalingState === "have-local-offer" && desc.type === "offer") {
-      this.send({
+      this.emitSig({
         type: "rtc",
         room: this.room,
         from: this.me,
@@ -812,19 +1004,75 @@ export class CallNet {
     }
   }
 
-  private scheduleOffer(peer: string) {
-    void this.enqueue(peer, async () => {
-      await this.waitForMic(800);
-      await this.offerNow(peer);
-    });
-    window.setTimeout(() => {
-      if (this.stopped) return;
+  private emitSig(frame: Omit<RtcFrame, "ts" | "sess">) {
+    this.send({ ...frame, ts: Date.now(), sess: this.sess });
+  }
+
+  private clearOfferRetry(peer: string) {
+    const id = this.offerRetry.get(peer);
+    if (id != null) window.clearInterval(id);
+    this.offerRetry.delete(peer);
+  }
+
+  private cancelPeerDrop(peer: string) {
+    const id = this.peerDropTimer.get(peer);
+    if (id != null) window.clearTimeout(id);
+    this.peerDropTimer.delete(peer);
+  }
+
+  private armPeerDrop(peer: string) {
+    if (this.peerDropTimer.has(peer)) return;
+    const pc = this.pcs.get(peer);
+    const ice = pc?.iceConnectionState;
+    // Keep a working ICE link through brief roster blips.
+    const grace =
+      ice === "connected" || ice === "completed" || ice === "checking" ? 20000 : 5000;
+    const id = window.setTimeout(() => {
+      this.peerDropTimer.delete(peer);
+      if (this.stopped || this.wantPeers.has(peer)) return;
+      this.drop(peer);
+    }, grace);
+    this.peerDropTimer.set(peer, id);
+  }
+
+  private clearIceStuck(peer: string) {
+    const id = this.iceStuckTimer.get(peer);
+    if (id != null) window.clearTimeout(id);
+    this.iceStuckTimer.delete(peer);
+  }
+
+  private armIceStuck(peer: string, pc: RTCPeerConnection) {
+    if (this.iceStuckTimer.has(peer)) return;
+    const id = window.setTimeout(() => {
+      this.iceStuckTimer.delete(peer);
+      if (this.stopped || this.pcs.get(peer) !== pc) return;
+      const ice = pc.iceConnectionState;
+      if (ice !== "checking" && ice !== "disconnected") return;
+      this.trace("ICE travou · religando", "warn", peer);
+      this.maybeReconnect(peer, pc);
+    }, 12000);
+    this.iceStuckTimer.set(peer, id);
+  }
+
+  private armOfferRetry(peer: string) {
+    this.clearOfferRetry(peer);
+    const id = window.setInterval(() => {
+      if (this.stopped) {
+        this.clearOfferRetry(peer);
+        return;
+      }
       const pc = this.pcs.get(peer);
-      if (!pc) return;
-      if (pc.connectionState === "connected") return;
-      if (rtcPolite(this.me, peer)) return;
+      if (!pc || rtcPolite(this.me, peer)) {
+        this.clearOfferRetry(peer);
+        return;
+      }
+      const ice = pc.iceConnectionState;
+      if (ice === "connected" || ice === "completed") {
+        this.clearOfferRetry(peer);
+        return;
+      }
       if (pc.signalingState === "have-local-offer" && pc.localDescription?.type === "offer") {
-        this.send({
+        this.emitSig({
           type: "rtc",
           room: this.room,
           from: this.me,
@@ -832,12 +1080,32 @@ export class CallNet {
           kind: "offer",
           sdp: pc.localDescription.sdp,
         });
+        this.trace("reenviando oferta", "info", peer);
         return;
       }
-      if (pc.signalingState === "stable") {
+      // Answer already applied — don't mint a fresh offer while ICE is still checking.
+      if (
+        pc.remoteDescription &&
+        (pc.iceConnectionState === "checking" ||
+          pc.iceConnectionState === "connected" ||
+          pc.iceConnectionState === "completed")
+      ) {
+        this.clearOfferRetry(peer);
+        return;
+      }
+      // Only mint a fresh offer if we never got an answer, or layout must grow (hub).
+      if (pc.signalingState === "stable" && (!pc.remoteDescription || this.pcLayoutStale(pc, peer))) {
         void this.enqueue(peer, () => this.offerNow(peer));
       }
-    }, 2500);
+    }, 2000);
+    this.offerRetry.set(peer, id);
+  }
+
+  private scheduleOffer(peer: string) {
+    void this.enqueue(peer, async () => {
+      await this.waitForMic(800);
+      await this.offerNow(peer);
+    });
   }
 
   private kickImpoliteOffers() {
@@ -857,6 +1125,13 @@ export class CallNet {
     }
   }
 
+  private pcLayoutStale(pc: RTCPeerConnection, peer: string): boolean {
+    const live = pc.getTransceivers().filter((t) => t.direction !== "stopped").length;
+    if (!live) return false;
+    // Only undersized layouts are stale. Extra hub forward m-lines after 3→2 are fine.
+    return live < callWantedMLines(this.layoutExtras(peer).length);
+  }
+
   private addMLines(pc: RTCPeerConnection, peer: string) {
     const audioTrack = this.localAudio();
     const videoTrack = this.cam?.getVideoTracks()[0] ?? null;
@@ -874,6 +1149,83 @@ export class CallNet {
     this.camSenders.set(peer, cam.sender);
     this.screenSenders.set(peer, screen.sender);
     this.screenXcvr.set(peer, screen);
+    this.addFwdMLines(pc, peer);
+  }
+
+  private addFwdMLines(pc: RTCPeerConnection, peer: string) {
+    const extras = this.layoutExtras(peer);
+    if (!extras.length) return;
+    const direction: RTCRtpTransceiverDirection = this.hub === this.me ? "sendonly" : "recvonly";
+    const want = callWantedMLines(extras.length);
+    while (pc.getTransceivers().filter((t) => t.direction !== "stopped").length < want) {
+      pc.addTransceiver("audio", { direction });
+      pc.addTransceiver("video", { direction });
+      pc.addTransceiver("video", { direction });
+    }
+  }
+
+  private ensureMLines(pc: RTCPeerConnection, peer: string) {
+    const live = [...pc.getTransceivers()].filter((t) => t.direction !== "stopped");
+    if (!live.length) {
+      this.addMLines(pc, peer);
+    } else {
+      this.addFwdMLines(pc, peer);
+    }
+    this.bindSenders(pc, peer);
+    this.bindFwd(pc, peer);
+  }
+
+  private bindFwd(pc: RTCPeerConnection, peer: string) {
+    const extras = this.layoutExtras(peer);
+    const live = [...pc.getTransceivers()].filter((t) => t.direction !== "stopped");
+    for (let i = 0; i < extras.length; i += 1) {
+      const from = extras[i];
+      const base = 3 + i * 3;
+      const audio = live[base];
+      const cam = live[base + 1];
+      const screen = live[base + 2];
+      if (audio) this.fwdSenders.set(this.fwdKey(peer, from, "a"), audio.sender);
+      if (cam) this.fwdSenders.set(this.fwdKey(peer, from, "c"), cam.sender);
+      if (screen) this.fwdSenders.set(this.fwdKey(peer, from, "s"), screen.sender);
+    }
+  }
+
+  private rememberInbound(
+    from: string,
+    screen: boolean,
+    kind: string,
+    track: MediaStreamTrack | null,
+  ) {
+    const cur = this.inbound.get(from) ?? { audio: null, cam: null, screen: null };
+    if (kind === "audio") cur.audio = track;
+    else if (screen) cur.screen = track;
+    else cur.cam = track;
+    this.inbound.set(from, cur);
+  }
+
+  private forwardTrack(
+    from: string,
+    kind: string,
+    screen: boolean,
+    track: MediaStreamTrack | null,
+  ) {
+    if (this.hub !== this.me) return;
+    const slot: "a" | "c" | "s" = kind === "audio" ? "a" : screen ? "s" : "c";
+    for (const to of this.pcs.keys()) {
+      if (to === from) continue;
+      const sender = this.fwdSenders.get(this.fwdKey(to, from, slot));
+      if (!sender) continue;
+      void sender.replaceTrack(track).catch(() => undefined);
+    }
+  }
+
+  private replayInbound() {
+    if (this.hub !== this.me) return;
+    for (const [from, tracks] of this.inbound) {
+      this.forwardTrack(from, "audio", false, tracks.audio);
+      this.forwardTrack(from, "video", false, tracks.cam);
+      this.forwardTrack(from, "video", true, tracks.screen);
+    }
   }
 
   private preferH264IfLinux(pc: RTCPeerConnection, sdp?: string) {
@@ -900,8 +1252,11 @@ export class CallNet {
   }
 
   private bindSenders(pc: RTCPeerConnection, peer: string) {
+    const extras = this.layoutExtras(peer);
     const live = [...pc.getTransceivers()].filter((t) => t.direction !== "stopped");
-    for (const t of live) {
+    const primaryEnd = callPrimaryCount(extras.length, live.length);
+    for (let i = 0; i < primaryEnd; i += 1) {
+      const t = live[i];
       if (t.direction === "recvonly" || t.direction === "inactive") {
         try {
           t.direction = "sendrecv";
@@ -910,13 +1265,23 @@ export class CallNet {
         }
       }
     }
+    const primary = live.slice(0, primaryEnd);
     const audio =
-      live.find((t) => t.sender.dtmf) ?? live.find((t) => this.xcvrKind(t) === "audio");
-    const videos = live
+      primary.find((t) => t.sender.dtmf) ?? primary.find((t) => this.xcvrKind(t) === "audio");
+    const videos = primary
       .filter((t) => t !== audio && !t.sender.dtmf)
       .sort((a, b) =>
         String(a.mid ?? "").localeCompare(String(b.mid ?? ""), undefined, { numeric: true }),
       );
+    if (extras.length > 0) {
+      if (primary[0]) this.audioSenders.set(peer, primary[0].sender);
+      if (primary[1]) this.camSenders.set(peer, primary[1].sender);
+      if (primary[2]) {
+        this.screenSenders.set(peer, primary[2].sender);
+        this.screenXcvr.set(peer, primary[2]);
+      }
+      return;
+    }
     if (audio) this.audioSenders.set(peer, audio.sender);
     if (videos[0]) this.camSenders.set(peer, videos[0].sender);
     if (videos[1]) {
@@ -927,21 +1292,21 @@ export class CallNet {
     }
     if (!audio || videos.length < 2) {
       const pick = pickCallTransceivers(
-        live.map((t) => ({ mid: t.mid, kind: this.xcvrKind(t) })),
+        primary.map((t) => ({ mid: t.mid, kind: this.xcvrKind(t) })),
       );
-      if (!audio && live[pick.audio] && this.xcvrKind(live[pick.audio]) !== "video") {
-        this.audioSenders.set(peer, live[pick.audio].sender);
+      if (!audio && primary[pick.audio] && this.xcvrKind(primary[pick.audio]) !== "video") {
+        this.audioSenders.set(peer, primary[pick.audio].sender);
       }
-      if (!videos[0] && pick.cam != null && this.xcvrKind(live[pick.cam]) !== "audio") {
-        this.camSenders.set(peer, live[pick.cam].sender);
+      if (!videos[0] && pick.cam != null && this.xcvrKind(primary[pick.cam]) !== "audio") {
+        this.camSenders.set(peer, primary[pick.cam].sender);
       }
       if (
         !videos[1] &&
         pick.screen != null &&
-        this.xcvrKind(live[pick.screen]) !== "audio"
+        this.xcvrKind(primary[pick.screen]) !== "audio"
       ) {
-        this.screenSenders.set(peer, live[pick.screen].sender);
-        this.screenXcvr.set(peer, live[pick.screen]);
+        this.screenSenders.set(peer, primary[pick.screen].sender);
+        this.screenXcvr.set(peer, primary[pick.screen]);
       }
     }
   }
@@ -1027,7 +1392,11 @@ export class CallNet {
     if (pc.signalingState !== "stable") return;
     if (!pc.getTransceivers().some((t) => t.direction !== "stopped")) {
       this.addMLines(pc, peer);
+    } else {
+      this.addFwdMLines(pc, peer);
     }
+    this.bindSenders(pc, peer);
+    this.bindFwd(pc, peer);
     await this.pushLocal(peer);
     if (this.stopped || this.pcs.get(peer) !== pc || pc.signalingState !== "stable") return;
     try {
@@ -1038,10 +1407,9 @@ export class CallNet {
     } finally {
       this.makingOffer.delete(peer);
     }
-    await this.waitIce(pc, 400);
     if (this.stopped || this.pcs.get(peer) !== pc) return;
     if (!canPublishLocalSdp("offer", pc.localDescription?.type)) return;
-    this.send({
+    this.emitSig({
       type: "rtc",
       room: this.room,
       from: this.me,
@@ -1050,26 +1418,7 @@ export class CallNet {
       sdp: pc.localDescription!.sdp,
     });
     this.trace("oferta enviada", "info", peer);
-  }
-
-  private async waitIce(pc: RTCPeerConnection, ms: number) {
-    if (pc.iceGatheringState === "complete") return;
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      const done = () => {
-        if (settled) return;
-        settled = true;
-        pc.removeEventListener("icegatheringstatechange", onChange);
-        window.clearTimeout(timer);
-        resolve();
-      };
-      const onChange = () => {
-        if (pc.iceGatheringState === "complete") done();
-      };
-      const timer = window.setTimeout(done, ms);
-      pc.addEventListener("icegatheringstatechange", onChange);
-      onChange();
-    });
+    this.armOfferRetry(peer);
   }
 
   private sinkKey(peer: string, screen: boolean) {
@@ -1120,8 +1469,11 @@ export class CallNet {
   private drop(peer: string, silent = false) {
     const pc = this.pcs.get(peer);
     if (!pc) return;
+    this.clearOfferRetry(peer);
+    this.cancelPeerDrop(peer);
+    this.clearIceStuck(peer);
     if (!silent) {
-      this.send({ type: "rtc", room: this.room, from: this.me, to: peer, kind: "bye" });
+      this.emitSig({ type: "rtc", room: this.room, from: this.me, to: peer, kind: "bye" });
     }
     pc.close();
     this.pcs.delete(peer);
@@ -1141,6 +1493,10 @@ export class CallNet {
     this.pcSeen.delete(peer);
     this.heard.delete(peer);
     this.seenScreen.delete(peer);
+    this.inbound.delete(peer);
+    for (const key of [...this.fwdSenders.keys()]) {
+      if (key.startsWith(`${peer}|`) || key.includes(`|${peer}|`)) this.fwdSenders.delete(key);
+    }
     this.dropSinks(peer);
     this.trace(silent ? "par saiu" : "enlace fechado", "warn", peer);
     this.noteMode();

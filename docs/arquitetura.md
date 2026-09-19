@@ -57,6 +57,8 @@ Implicação 18: não se promete “entrou, leu 2019” se não houver chave nem
 
 21. **Stack do MVP:** núcleo em **Rust** (identidade, log, MLS, erasure, sync, SFU no desktop); UI desktop **Tauri 2 + React/TS**; cache **SQLite**; chat **WebSocket** (QUIC depois); call 1:1 **WebRTC**; SFU embutida **`str0m`**; NAT **coturn**; erasure **`reed-solomon-erasure`**; grupo E2EE **OpenMLS**; identidade **ed25519-dalek** + `did:key`. O mesmo binário Rust com flag `--node` cobre VPS/PC 24h. Mobile light depois (UniFFI). Fora do v1: Electron, DHT/libp2p, fork Matrix, LiveKit/mediasoup como produto, cripto na UI.
 22. **Todo cliente da comunidade é nó de histórico, não só de mensagem ao vivo.** Entrar na guild = entrar no *n* do erasure daquela comunidade (pedaços cifrados). Não existe “só conversa, HD é problema de outro”. O que **não** é fixo: um único device dono do arquivo (owner / primeiro a abrir **não** é *o* servidor). O arquivo é o conjunto dos clientes. Cota por device (celular guarda menos que desktop); handoff na saída continua (def. 20). Sem *k* pedaços recuperáveis, histórico pendente/perdido (def. 18). Chat ao vivo não espera o arquivo.
+23. **P2P entre clientes fica; a plataforma não hospeda servidor no meio para esconder IP.** Comunidade é para gente de confiança — convite não é para qualquer um. Membro (ou convite vazado) pode ver endereço de rede e incomodar a conexão dos outros; isso é o preço de não ter um Discord central. Aviso na UI, não um gateway Chaincord. Nó `--node` de um membro continua permitido; não é obrigação do Felipe operar infra para “consertar” o P2P.
+24. **O relé MQTT é da comunidade.** Quem cria **hospeda o hub no próprio app** (mesma porta do P2P). O convite leva esses `ws://`. Não há HiveMQ/EMQX/Mosquitto nem campo de URL. Quem entra só cola o convite. Sem o criador alcançável na internet (LAN, VPS, porta aberta), WAN não sobe — LAN/P2P direto continua. `CHAINCORD_RELAY` só para override local. TURN da call é outro cabo.
 
 ### Hipótese (ainda não fechada)
 
@@ -70,7 +72,7 @@ Implicação 18: não se promete “entrou, leu 2019” se não houver chave nem
 |---|---|---|---|
 | Rede descentralizada | Exigência | Log assinado + nós substituíveis | **Definido** |
 | Auditoria de mensagens no log de autoridade | Em dúvida | Corpo não; hash chain por canal | **Aberto** |
-| P2P como caminho primário de entrega | Intenção original | P2P = atalho + sync entre réplicas; entrega ao vivo pelos nós da comunidade | Em disputa |
+| P2P como caminho primário de entrega | Sim; sem servidor da plataforma para esconder IP | P2P = atalho; nó de membro ok; aviso de confiança no convite | **Definido (23)** |
 | Quem opera storage | Todos os clientes daquela comunidade | Erasure; cota menor no celular | **Definido (22)** |
 | Papéis de peer | Clientes = nós de msg + histórico | SFU continua só desktop (def. 19) | **Definido (22)** |
 | Sharding / erasure por comunidade | Sim, entre os clientes da guild | Pool = membros, não o Chaincord | **Definido** |
@@ -88,6 +90,9 @@ Implicação 18: não se promete “entrou, leu 2019” se não houver chave nem
 | Stack | Rust + Tauri 2 + React; coturn; OpenMLS | Um core, três papéis (light, storage, SFU) | **Definido (21)** |
 | Primeiro device = o servidor | Não | Todos compartilham pedaços; owner ≠ HD | **Definido (22)** |
 | Identidade humana (nome) | Pseudônimo ok | `did:key` + alias | Aberto |
+| Servidor Chaincord no meio (estilo Discord) | Não vale o esforço; quebra a tese | Fecha ataque a IP; Felipe não quer operar isso no MVP | **Definido (23): não** |
+| Comunidade aberta a qualquer convite | Não — só gente de confiança | Aviso não segura convite vazado / membro que virou hostil | **Definido (23)** |
+| Relé MQTT | Hub no app de quem cria; convite leva o `ws://` | Sem broker público; WAN precisa do criador alcançável | **Definido (24)** |
 
 ---
 
@@ -373,5 +378,7 @@ Há um canvas antigo de revisão no projeto Cursor; **este markdown é a fonte d
 | 2026-08-18 | Felipe fechou a **stack do MVP** (definição 21): Rust core, Tauri 2 + React, SQLite, OpenMLS, str0m, coturn. Electron/DHT/Matrix/LiveKit fora. |
 | 2026-08-18 | Felipe: **storage não é fixo** (definição 22, primeira versão): owner / primeiro device não é o servidor. Opt-in. |
 | 2026-08-18 | Felipe redefiniu 22: **todo cliente é nó de histórico** (não só ao vivo). Celular entra no erasure com cota menor. Handoff vale para todos. |
+| 2026-08-22 | Felipe: **sem servidor da plataforma no meio** para tapar o P2P (definição 23). Convite só para quem se confia; usuário ciente de que membro malicioso vê IP / pode atacar a conexão. Onion e Tor na call ficam fora (qualidade). |
+| 2026-09-18 | Felipe: o relé MQTT é **da comunidade** (definição 24). Hub no app de quem cria; convite leva o endereço. Sem HiveMQ/EMQX/Mosquitto. |
 
 Próximas anotações: o que o Felipe disser como “é assim” sobe para **Definições**. Perguntas não se anotam, salvo se ele pedir ou fechar uma decisão.

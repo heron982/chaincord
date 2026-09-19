@@ -1,7 +1,7 @@
 use crate::peer::{send_signal, AppState};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -36,7 +36,6 @@ use webrtc::track::track_local::TrackLocal;
 const PCMU_HZ: u32 = 8000;
 const FRAME_SAMPLES: usize = 160;
 const VIDEO_MS: u64 = 100;
-const TRACE: &str = "ui-call-trace";
 const LINK: &str = "ui-call-link";
 const VIDEO: &str = "ui-call-video";
 
@@ -58,8 +57,16 @@ struct Session {
     cam_jpeg: Arc<StdMutex<Option<Vec<u8>>>>,
     screen_jpeg: Arc<StdMutex<Option<Vec<u8>>>>,
     screen_share: Arc<AtomicBool>,
-    play: Arc<StdMutex<VecDeque<i16>>>,
+    play: Arc<StdMutex<MixBuf>>,
     running: Arc<AtomicBool>,
+    hub: Option<String>,
+    others: Vec<String>,
+    last_sig: HashMap<String, i64>,
+    last_sess: HashMap<String, String>,
+}
+
+struct MixBuf {
+    acc: [i32; FRAME_SAMPLES],
 }
 
 struct Peer {
@@ -67,6 +74,10 @@ struct Peer {
     track: Arc<TrackLocalStaticSample>,
     cam: Arc<TrackLocalStaticSample>,
     screen: Arc<TrackLocalStaticSample>,
+    extras: Vec<String>,
+    fwd_audio: HashMap<String, Arc<TrackLocalStaticSample>>,
+    fwd_cam: HashMap<String, Arc<TrackLocalStaticSample>>,
+    fwd_screen: HashMap<String, Arc<TrackLocalStaticSample>>,
     making_offer: AtomicBool,
     ice_retry: AtomicU64,
     pending_ice: StdMutex<Vec<RTCIceCandidateInit>>,
@@ -80,17 +91,8 @@ pub struct RtcFrameIn {
     kind: String,
     sdp: Option<String>,
     candidate: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CallTrace {
-    id: u64,
-    t: i64,
-    mode: String,
-    peer: Option<String>,
-    event: String,
-    level: String,
+    ts: Option<i64>,
+    sess: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -127,23 +129,63 @@ fn polite(me: &str, peer: &str) -> bool {
     me > peer
 }
 
+fn wanted_peers(me: &str, others: &[String], hub: Option<&str>) -> Vec<String> {
+    if hub.is_none() || others.len() < 2 {
+        return others.to_vec();
+    }
+    let hub = hub.unwrap();
+    if me == hub {
+        others.to_vec()
+    } else if others.iter().any(|p| p == hub) {
+        vec![hub.to_string()]
+    } else {
+        others.to_vec()
+    }
+}
+
+fn forward_peers(hub: &str, remote: &str, me: &str, others: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = others.to_vec();
+    all.push(me.to_string());
+    all.retain(|p| !p.is_empty() && p != hub && p != remote);
+    all.sort();
+    all.dedup();
+    all
+}
+
+fn slot_peer<'a>(index: usize, remote: &'a str, extras: &'a [String]) -> &'a str {
+    if index < 3 {
+        remote
+    } else {
+        extras
+            .get((index - 3) / 3)
+            .map(String::as_str)
+            .unwrap_or(remote)
+    }
+}
+
+fn mix_ulaw_frame(buf: &mut MixBuf, payload: &[u8]) {
+    for (i, b) in payload.iter().take(FRAME_SAMPLES).enumerate() {
+        buf.acc[i] = buf.acc[i].saturating_add(i32::from(ulaw_to_linear(*b)));
+    }
+}
+
+fn take_mix_frame(buf: &mut MixBuf) -> [i16; FRAME_SAMPLES] {
+    let mut pcm = [0i16; FRAME_SAMPLES];
+    for i in 0..FRAME_SAMPLES {
+        pcm[i] = buf.acc[i].clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        buf.acc[i] = 0;
+    }
+    pcm
+}
+
 fn now_ms() -> i64 {
     crate::crypto::now_ms()
 }
 
 fn trace(app: &AppHandle, hub: &RtcHub, event: &str, level: &str, peer: Option<&str>) {
-    let id = hub.trace_seq.fetch_add(1, Ordering::Relaxed) + 1;
-    let _ = app.emit(
-        TRACE,
-        CallTrace {
-            id,
-            t: now_ms(),
-            mode: "1:1".into(),
-            peer: peer.map(str::to_string),
-            event: event.into(),
-            level: level.into(),
-        },
-    );
+    let _ = hub.trace_seq.fetch_add(1, Ordering::Relaxed);
+    crate::log::append_call(now_ms(), "call", peer, event, level);
+    let _ = app;
 }
 
 fn ice_servers() -> Vec<RTCIceServer> {
@@ -373,7 +415,7 @@ fn spawn_pulse(
     app: AppHandle,
     running: Arc<AtomicBool>,
     tracks: Arc<StdMutex<Vec<Arc<TrackLocalStaticSample>>>>,
-    play: Arc<StdMutex<VecDeque<i16>>>,
+    play: Arc<StdMutex<MixBuf>>,
 ) -> bool {
     let rec_run = running.clone();
     let rec_app = app;
@@ -436,9 +478,7 @@ fn spawn_pulse(
                     let Ok(mut buf) = play.lock() else {
                         break;
                     };
-                    for slot in pcm.iter_mut() {
-                        *slot = buf.pop_front().unwrap_or(0);
-                    }
+                    pcm = take_mix_frame(&mut buf);
                 }
                 let mut err = 0i32;
                 let rc = unsafe {
@@ -681,6 +721,17 @@ fn spawn_video_send(
     });
 }
 
+fn video_is_screen(mid: Option<&str>, stream_id: &str, track_id: &str) -> bool {
+    let blob = format!("{stream_id} {track_id}").to_lowercase();
+    if blob.contains("screen") || blob.contains("display") {
+        return true;
+    }
+    match mid.and_then(|m| m.parse::<usize>().ok()) {
+        Some(n) => n % 3 == 2,
+        None => false,
+    }
+}
+
 fn emit_video(app: &AppHandle, peer: &str, screen: bool, jpeg: &[u8]) {
     let _ = app.emit(
         VIDEO,
@@ -690,6 +741,70 @@ fn emit_video(app: &AppHandle, peer: &str, screen: bool, jpeg: &[u8]) {
             jpeg: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, jpeg),
         },
     );
+}
+
+fn collect_fwd(
+    session: &Session,
+    from: &str,
+    kind: &str,
+) -> Vec<Arc<TrackLocalStaticSample>> {
+    if session.hub.as_deref() != Some(session.me.as_str()) {
+        return Vec::new();
+    }
+    session
+        .peers
+        .iter()
+        .filter(|(id, _)| id.as_str() != from)
+        .filter_map(|(_, peer)| match kind {
+            "audio" => peer.fwd_audio.get(from).cloned(),
+            "screen" => peer.fwd_screen.get(from).cloned(),
+            _ => peer.fwd_cam.get(from).cloned(),
+        })
+        .collect()
+}
+
+fn forward_video(hub: Arc<RtcHub>, from: String, screen: bool, data: Vec<u8>) {
+    if data.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let tracks = {
+            let guard = hub.inner.lock().await;
+            let Some(session) = guard.as_ref() else {
+                return;
+            };
+            collect_fwd(session, &from, if screen { "screen" } else { "cam" })
+        };
+        let sample = Sample {
+            data: Bytes::from(data),
+            duration: Duration::from_millis(VIDEO_MS),
+            ..Default::default()
+        };
+        for track in tracks {
+            let _ = track.write_sample(&sample).await;
+        }
+    });
+}
+
+async fn forward_audio(hub: Arc<RtcHub>, from: String, payload: Vec<u8>) {
+    if payload.is_empty() {
+        return;
+    }
+    let tracks = {
+        let guard = hub.inner.lock().await;
+        let Some(session) = guard.as_ref() else {
+            return;
+        };
+        collect_fwd(session, &from, "audio")
+    };
+    let sample = Sample {
+        data: Bytes::from(payload),
+        duration: Duration::from_millis(20),
+        ..Default::default()
+    };
+    for track in tracks {
+        let _ = track.write_sample(&sample).await;
+    }
 }
 
 fn spawn_video_recv(
@@ -731,9 +846,6 @@ fn spawn_video_recv(
                         );
                     }
                     emit_video(&app, &peer, screen, &jpeg);
-                    if !screen && w >= 800 {
-                        emit_video(&app, &peer, true, &jpeg);
-                    }
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -750,6 +862,9 @@ fn spawn_video_recv(
                 }
             }
         }
+        if seen {
+            emit_video(&app, &peer, screen, &[]);
+        }
     });
     tx
 }
@@ -761,7 +876,7 @@ async fn bind_pc(
     room: String,
     peer: String,
     pc: Arc<RTCPeerConnection>,
-    play: Arc<StdMutex<VecDeque<i16>>>,
+    play: Arc<StdMutex<MixBuf>>,
     heard: Arc<AtomicBool>,
 ) {
     let app_ice = app.clone();
@@ -887,10 +1002,19 @@ async fn bind_pc(
             if track.kind() != RTPCodecType::Audio {
                 let mid = xcvr.mid();
                 let stream_id = track.stream_id();
-                let screen = !matches!(mid.as_deref(), Some("0") | Some("1"))
-                    || stream_id.to_lowercase().contains("screen")
-                    || stream_id.to_lowercase().contains("display");
-                let tx = spawn_video_recv(app.clone(), traces.clone(), peer.clone(), screen);
+                let track_id = track.id();
+                let idx = mid.as_deref().and_then(|m| m.parse::<usize>().ok()).unwrap_or(0);
+                let extras = {
+                    let guard = traces.inner.lock().await;
+                    guard
+                        .as_ref()
+                        .and_then(|s| s.peers.get(&peer))
+                        .map(|p| p.extras.clone())
+                        .unwrap_or_default()
+                };
+                let from_peer = slot_peer(idx, &peer, &extras).to_string();
+                let screen = video_is_screen(mid.as_deref(), &stream_id, &track_id);
+                let tx = spawn_video_recv(app.clone(), traces.clone(), from_peer.clone(), screen);
                 let mut depacketizer = H264Packet::default();
                 let mut acc = Vec::new();
                 let mut last_ts: Option<u32> = None;
@@ -923,7 +1047,9 @@ async fn bind_pc(
                             }
                             if last_ts.is_some_and(|ts| ts != pkt.header.timestamp) && !acc.is_empty()
                             {
-                                let _ = tx.try_send(std::mem::take(&mut acc));
+                                let frame = std::mem::take(&mut acc);
+                                forward_video(traces.clone(), from_peer.clone(), screen, frame.clone());
+                                let _ = tx.try_send(frame);
                                 depacketizer = H264Packet::default();
                             }
                             last_ts = Some(pkt.header.timestamp);
@@ -933,7 +1059,9 @@ async fn bind_pc(
                                 }
                             }
                             if pkt.header.marker && !acc.is_empty() {
-                                let _ = tx.try_send(std::mem::take(&mut acc));
+                                let frame = std::mem::take(&mut acc);
+                                forward_video(traces.clone(), from_peer.clone(), screen, frame.clone());
+                                let _ = tx.try_send(frame);
                             }
                             if acc.len() > 1_000_000 {
                                 acc.clear();
@@ -988,14 +1116,14 @@ async fn bind_pc(
                     continue;
                 }
                 if let Ok(mut buf) = play.lock() {
-                    for b in pkt.payload.iter() {
-                        buf.push_back(ulaw_to_linear(*b));
-                    }
-                    if buf.len() > PCMU_HZ as usize * 2 {
-                        let extra = buf.len() - PCMU_HZ as usize;
-                        buf.drain(..extra);
-                    }
+                    mix_ulaw_frame(&mut buf, &pkt.payload);
                 }
+                let samples = pkt.payload.to_vec();
+                let from_pk = peer.clone();
+                let traces_fwd = traces.clone();
+                tauri::async_runtime::spawn(async move {
+                    forward_audio(traces_fwd, from_pk, samples).await;
+                });
             }
         })
     }));
@@ -1041,7 +1169,13 @@ async fn emit_link(app: &AppHandle, hub: &RtcHub) {
             jitter_ms: None,
             peers: n,
             live,
-            mode: if n <= 1 { "1:1" } else { "mesh" }.into(),
+            mode: if session.hub.is_some() && session.others.len() >= 2 {
+                "HUB:N".into()
+            } else if n <= 1 {
+                "1:1".into()
+            } else {
+                "mesh".into()
+            },
         },
     );
     drop(guard);
@@ -1068,9 +1202,16 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<(Arc<RTCPeerConnect
             }
         }
     }
-    let (app, me, room, play, tracks, cam_tracks, screen_tracks) = {
+    let (app, me, room, play, tracks, cam_tracks, screen_tracks, extras, as_hub) = {
         let guard = hub.inner.lock().await;
         let session = guard.as_ref().ok_or("call nativa parada")?;
+        let extras = session
+            .hub
+            .as_ref()
+            .filter(|_| session.others.len() >= 2)
+            .map(|h| forward_peers(h, peer, &session.me, &session.others))
+            .unwrap_or_default();
+        let as_hub = session.hub.as_deref() == Some(session.me.as_str());
         (
             session.app.clone(),
             session.me.clone(),
@@ -1079,6 +1220,8 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<(Arc<RTCPeerConnect
             session.tracks.clone(),
             session.cam_tracks.clone(),
             session.screen_tracks.clone(),
+            extras,
+            as_hub,
         )
     };
     let pc = Arc::new(new_pc().await?);
@@ -1110,6 +1253,49 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<(Arc<RTCPeerConnect
         .map_err(err)?;
     }
 
+    let mut fwd_audio = HashMap::new();
+    let mut fwd_cam = HashMap::new();
+    let mut fwd_screen = HashMap::new();
+    let direction = if as_hub {
+        RTCRtpTransceiverDirection::Sendonly
+    } else {
+        RTCRtpTransceiverDirection::Recvonly
+    };
+    for from in &extras {
+        let audio_t = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_PCMU.to_owned(),
+                clock_rate: PCMU_HZ,
+                channels: 1,
+                ..Default::default()
+            },
+            format!("fwd-a-{from}"),
+            "chaincord".into(),
+        ));
+        let cam_t = video_sample_track(&format!("fwd-c-{from}"));
+        let screen_t = video_sample_track(&format!("fwd-s-{from}"));
+        for track in [
+            Arc::clone(&audio_t) as Arc<dyn TrackLocal + Send + Sync>,
+            Arc::clone(&cam_t) as Arc<dyn TrackLocal + Send + Sync>,
+            Arc::clone(&screen_t) as Arc<dyn TrackLocal + Send + Sync>,
+        ] {
+            pc.add_transceiver_from_track(
+                track,
+                Some(RTCRtpTransceiverInit {
+                    direction,
+                    send_encodings: vec![],
+                }),
+            )
+            .await
+            .map_err(err)?;
+        }
+        if as_hub {
+            fwd_audio.insert(from.clone(), audio_t);
+            fwd_cam.insert(from.clone(), cam_t);
+            fwd_screen.insert(from.clone(), screen_t);
+        }
+    }
+
     {
         let mut guard = hub.inner.lock().await;
         let Some(session) = guard.as_mut() else {
@@ -1130,6 +1316,10 @@ async fn ensure_peer(hub: Arc<RtcHub>, peer: &str) -> Result<(Arc<RTCPeerConnect
                 track: audio.clone(),
                 cam: cam.clone(),
                 screen: screen.clone(),
+                extras: extras.clone(),
+                fwd_audio,
+                fwd_cam,
+                fwd_screen,
                 making_offer: AtomicBool::new(false),
                 ice_retry: AtomicU64::new(0),
                 pending_ice: StdMutex::new(Vec::new()),
@@ -1350,7 +1540,9 @@ pub async fn start(app: &AppHandle, room: String, me: String) -> Result<(), Stri
                 let _ = p.pc.close().await;
             }
         }
-        let play = Arc::new(StdMutex::new(VecDeque::new()));
+        let play = Arc::new(StdMutex::new(MixBuf {
+            acc: [0; FRAME_SAMPLES],
+        }));
         let tracks = Arc::new(StdMutex::new(Vec::new()));
         let cam_tracks = Arc::new(StdMutex::new(Vec::new()));
         let screen_tracks = Arc::new(StdMutex::new(Vec::new()));
@@ -1414,6 +1606,10 @@ pub async fn start(app: &AppHandle, room: String, me: String) -> Result<(), Stri
             screen_share,
             play,
             running,
+            hub: None,
+            others: Vec::new(),
+            last_sig: HashMap::new(),
+            last_sess: HashMap::new(),
         });
     }
     trace(app, &hub, "motor nativo (WebKit sem WebRTC)", "info", None);
@@ -1442,16 +1638,21 @@ pub async fn stop(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn sync(app: &AppHandle, peers: Vec<String>) -> Result<(), String> {
+pub async fn sync(app: &AppHandle, peers: Vec<String>, hub_pk: Option<String>) -> Result<(), String> {
     let hub = state(app).rtc.clone();
-    let want: Vec<String> = {
-        let guard = hub.inner.lock().await;
-        let session = guard.as_ref().ok_or("call nativa parada")?;
-        peers
+    let (me, others, next_hub) = {
+        let mut guard = hub.inner.lock().await;
+        let session = guard.as_mut().ok_or("call nativa parada")?;
+        let others: Vec<String> = peers
             .into_iter()
             .filter(|p| !p.is_empty() && p != &session.me)
-            .collect()
+            .collect();
+        let next_hub = if others.len() >= 2 { hub_pk } else { None };
+        session.others = others.clone();
+        session.hub = next_hub.clone();
+        (session.me.clone(), others, next_hub)
     };
+    let want = wanted_peers(&me, &others, next_hub.as_deref());
     let existing: Vec<String> = {
         let guard = hub.inner.lock().await;
         guard
@@ -1463,6 +1664,21 @@ pub async fn sync(app: &AppHandle, peers: Vec<String>) -> Result<(), String> {
         drop_peer(&hub, id, false).await;
     }
     for id in &want {
+        let extras_now = next_hub
+            .as_ref()
+            .filter(|_| others.len() >= 2)
+            .map(|h| forward_peers(h, id, &me, &others))
+            .unwrap_or_default();
+        let stale = {
+            let guard = hub.inner.lock().await;
+            guard
+                .as_ref()
+                .and_then(|s| s.peers.get(id))
+                .is_some_and(|p| p.extras != extras_now)
+        };
+        if stale {
+            drop_peer(&hub, id, false).await;
+        }
         let created = ensure_peer(hub.clone(), id).await?.1;
         if created {
             offer_now(hub.clone(), id).await?;
@@ -1480,11 +1696,46 @@ pub async fn handle(app: &AppHandle, frame: RtcFrameIn) -> Result<(), String> {
         if frame.room != session.room || frame.from == session.me || frame.to != session.me {
             return Ok(());
         }
+        if session.hub.as_deref().is_some_and(|h| {
+            session.others.len() >= 2 && session.me != *h && frame.from != *h
+        }) {
+            return Ok(());
+        }
         (session.me.clone(), session.room.clone())
     };
     if frame.kind == "bye" {
+        let ts = frame.ts.unwrap_or(0);
+        let stale = {
+            let guard = hub.inner.lock().await;
+            guard.as_ref().is_some_and(|session| {
+                let last = session.last_sig.get(&frame.from).copied().unwrap_or(0);
+                let live_sess = session.last_sess.get(&frame.from);
+                let stale_sess = match (&frame.sess, live_sess) {
+                    (Some(bye), Some(live)) => bye != live,
+                    _ => false,
+                };
+                stale_sess || (ts > 0 && last > 0 && ts < last)
+            })
+        };
+        if stale {
+            trace(app, &hub, "bye atrasado", "info", Some(&frame.from));
+            return Ok(());
+        }
         drop_peer(&hub, &frame.from, true).await;
         return Ok(());
+    }
+    if let Some(sess) = &frame.sess {
+        if let Some(session) = hub.inner.lock().await.as_mut() {
+            session.last_sess.insert(frame.from.clone(), sess.clone());
+        }
+    }
+    if let Some(ts) = frame.ts {
+        if let Some(session) = hub.inner.lock().await.as_mut() {
+            let last = session.last_sig.entry(frame.from.clone()).or_insert(0);
+            if ts >= *last {
+                *last = ts;
+            }
+        }
     }
     let pc = ensure_peer(hub.clone(), &frame.from).await?.0;
     if frame.kind == "ice" {
@@ -1639,4 +1890,47 @@ pub async fn share_screen(app: &AppHandle, on: bool) -> Result<(), String> {
         trace(app, &hub, "tela nativa off", "info", None);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_mid_is_not_screen() {
+        assert!(!video_is_screen(Some("1"), "chaincord", "cam"));
+        assert!(!video_is_screen(None, "chaincord", "cam"));
+        assert!(!video_is_screen(Some("0"), "chaincord", "cam"));
+    }
+
+    #[test]
+    fn second_video_mid_or_name_is_screen() {
+        assert!(video_is_screen(Some("2"), "chaincord", "screen"));
+        assert!(video_is_screen(Some("5"), "chaincord", "v1"));
+        assert!(!video_is_screen(Some("4"), "chaincord", "v0"));
+        assert!(video_is_screen(Some("1"), "screen-share", "track"));
+        assert!(video_is_screen(None, "chaincord", "display"));
+        assert!(!video_is_screen(Some("1"), "chaincord", "v0"));
+    }
+
+    #[test]
+    fn mix_adds_two_talkers_instead_of_concatenating() {
+        let mut buf = MixBuf {
+            acc: [0; FRAME_SAMPLES],
+        };
+        mix_ulaw_frame(&mut buf, &[linear_to_ulaw(1000); FRAME_SAMPLES]);
+        mix_ulaw_frame(&mut buf, &[linear_to_ulaw(1000); FRAME_SAMPLES]);
+        let frame = take_mix_frame(&mut buf);
+        assert!(frame[0] > 1000);
+        assert_eq!(buf.acc[0], 0);
+    }
+
+    #[test]
+    fn star_leaves_only_dial_the_hub() {
+        let others = vec!["bb".into(), "cc".into()];
+        assert_eq!(wanted_peers("aa", &others, Some("aa")), others);
+        assert_eq!(wanted_peers("bb", &others, Some("aa")), vec!["aa".to_string()]);
+        assert_eq!(forward_peers("aa", "bb", "aa", &others), vec!["cc".to_string()]);
+        assert_eq!(slot_peer(4, "aa", &["cc".into()]), "cc");
+    }
 }

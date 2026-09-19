@@ -1,4 +1,5 @@
 mod crypto;
+mod log;
 mod nat;
 mod peer;
 mod relay;
@@ -16,14 +17,18 @@ fn get_state(state: tauri::State<Arc<AppState>>) -> UiState {
 }
 
 #[tauri::command]
-fn create_community(name: String, app: tauri::AppHandle) -> Result<(), String> {
-    peer::create_local(&app, &name);
-    Ok(())
+fn create_community(name: String, relay: Option<String>, app: tauri::AppHandle) -> Result<(), String> {
+    peer::create_local(&app, &name, relay.as_deref())
 }
 
 #[tauri::command]
 fn join_community(invite: String, app: tauri::AppHandle) -> Result<(), String> {
     peer::join_community(&app, &invite)
+}
+
+#[tauri::command]
+fn switch_community(id: String, app: tauri::AppHandle) -> Result<(), String> {
+    peer::switch_community(&app, &id)
 }
 
 #[tauri::command]
@@ -78,14 +83,14 @@ async fn rtc_stop(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn rtc_sync(peers: Vec<String>, app: tauri::AppHandle) -> Result<(), String> {
+async fn rtc_sync(peers: Vec<String>, hub: Option<String>, app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        crate::rtc::sync(&app, peers).await
+        crate::rtc::sync(&app, peers, hub).await
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (peers, app);
+        let _ = (peers, hub, app);
         Ok(())
     }
 }
@@ -147,14 +152,36 @@ fn publish_presence(
     muted: bool,
     deafened: bool,
     status: Option<String>,
+    sharing_screen: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    peer::publish_presence(&app, muted, deafened, status.as_deref())
+    peer::publish_presence(&app, muted, deafened, status.as_deref(), sharing_screen)
 }
 
 #[tauri::command]
 fn get_history(app: tauri::AppHandle) -> Vec<peer::UiMessage> {
     peer::get_history(&app)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CallLogLine {
+    t: Option<i64>,
+    mode: Option<String>,
+    peer: Option<String>,
+    event: String,
+    level: Option<String>,
+}
+
+#[tauri::command]
+fn append_call_log(line: CallLogLine) {
+    crate::log::append_call(
+        line.t.unwrap_or(0),
+        line.mode.as_deref().unwrap_or("-"),
+        line.peer.as_deref(),
+        &line.event,
+        line.level.as_deref().unwrap_or("info"),
+    );
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -174,6 +201,7 @@ pub fn run() {
             get_state,
             create_community,
             join_community,
+            switch_community,
             send_chat,
             add_room,
             join_call,
@@ -188,7 +216,8 @@ pub fn run() {
             leave_community,
             save_profile,
             publish_presence,
-            get_history
+            get_history,
+            append_call_log
         ])
         .setup(|app| {
             peer::boot(app.handle());

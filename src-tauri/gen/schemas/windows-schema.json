@@ -183,6 +183,12 @@
           "markdownDescription": "Criar canal ou sala de chamada"
         },
         {
+          "description": "Gravar log da call em arquivo",
+          "type": "string",
+          "const": "allow-append-call-log",
+          "markdownDescription": "Gravar log da call em arquivo"
+        },
+        {
           "description": "Criar comunidade",
           "type": "string",
           "const": "allow-create-community",
@@ -277,6 +283,12 @@
           "type": "string",
           "const": "allow-send-signal",
           "markdownDescription": "Sinalizacao WebRTC"
+        },
+        {
+          "description": "Alternar comunidade ativa",
+          "type": "string",
+          "const": "allow-switch-community",
+          "markdownDescription": "Alternar comunidade ativa"
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

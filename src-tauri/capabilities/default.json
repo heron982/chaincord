@@ -9,6 +9,7 @@
     "allow-get-state",
     "allow-create-community",
     "allow-join-community",
+    "allow-switch-community",
     "allow-send-chat",
     "allow-leave-community",
     "allow-add-room",
@@ -22,6 +23,7 @@
     "allow-rtc-push-frame",
     "allow-save-profile",
     "allow-publish-presence",
-    "allow-get-history"
+    "allow-get-history",
+    "allow-append-call-log"
   ]
 }
