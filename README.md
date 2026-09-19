@@ -36,7 +36,7 @@ Installer / exe:
 npm run dist
 ```
 
-Default Tauri output: `src-tauri/target/release/bundle/` (NSIS + exe). If a `D:\` disk exists with the local build layout, scripts under `scripts/` use it; otherwise they use system Cargo/Node.
+Default Tauri output: `src-tauri/target/release/bundle/` (NSIS + exe).
 
 ## Quick start
 
