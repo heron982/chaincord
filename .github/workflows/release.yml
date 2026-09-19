@@ -46,6 +46,6 @@ jobs:
             Download the NSIS installer (`Chaincord_*_x64-setup.exe`). Windows SmartScreen may warn until Authenticode signing is added (separate from updater signatures).
           releaseDraft: false
           prerelease: true
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: --bundles nsis
