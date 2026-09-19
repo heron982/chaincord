@@ -54,6 +54,12 @@ import {
 import { AudioSettings } from "./audio";
 import { ProfileEditor, UserPanel } from "./profile";
 import { playCallJoin, playCallLeave, setSoundSink, unlockSounds } from "./sounds";
+import {
+  checkForAppUpdate,
+  installAppUpdate,
+  isTauriRuntime,
+  type UpdateStatus,
+} from "./updater";
 
 type Line =
   | { kind: "chat"; sender: string; text: string; ts: number; self: boolean; channel: string }
@@ -119,8 +125,9 @@ export function App() {
   );
   const [callNotice, setCallNotice] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"profile" | "audio">("profile");
-  const [audioInputId, setAudioInputId] = useState(() => readAudioPref("input", prefStore()));
+  const [settingsTab, setSettingsTab] = useState<"profile" | "audio" | "about">("profile");
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ kind: "idle" });
+  const [updateBusy, setUpdateBusy] = useState(false);  const [audioInputId, setAudioInputId] = useState(() => readAudioPref("input", prefStore()));
   const [audioOutputId, setAudioOutputId] = useState(() => readAudioPref("output", prefStore()));
   const [micEpoch, setMicEpoch] = useState(0);
   const [micMuted, setMicMuted] = useState(false);
@@ -258,6 +265,38 @@ export function App() {
     void setSoundSink(audioOutputId);
   }, [audioOutputId]);
 
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let dead = false;
+    setUpdateStatus({ kind: "checking" });
+    void checkForAppUpdate().then((status) => {
+      if (!dead) setUpdateStatus(status);
+    });
+    return () => {
+      dead = true;
+    };
+  }, []);
+
+  const runUpdateCheck = async () => {
+    setUpdateStatus({ kind: "checking" });
+    setUpdateStatus(await checkForAppUpdate());
+  };
+
+  const runUpdateInstall = async () => {
+    if (updateBusy) return;
+    setUpdateBusy(true);
+    const version =
+      updateStatus.kind === "available" || updateStatus.kind === "downloading"
+        ? updateStatus.version
+        : "";
+    setUpdateStatus({ kind: "downloading", version, progress: 0 });
+    const result = await installAppUpdate((pct) => {
+      setUpdateStatus({ kind: "downloading", version, progress: pct });
+    });
+    setUpdateStatus(result);
+    setUpdateBusy(false);
+  };
+
   const stopMedia = () => {
     camStream.current?.getTracks().forEach((t) => t.stop());
     screenStream.current?.getTracks().forEach((t) => t.stop());
@@ -341,7 +380,7 @@ export function App() {
     void setSoundSink(deviceId);
   };
 
-  const openSettings = (tab: "profile" | "audio" = "profile") => {
+  const openSettings = (tab: "profile" | "audio" | "about" = "profile") => {
     setSettingsTab(tab);
     setSettingsOpen(true);
   };
@@ -950,6 +989,23 @@ export function App() {
   return (
     <div className="shell">
       {callNotice && <div className="app-toast">{callNotice}</div>}
+      {updateStatus.kind === "available" && (
+        <div className="app-toast update-toast">
+          Update {updateStatus.version} is ready.{" "}
+          <button type="button" className="linkish" onClick={() => void runUpdateInstall()}>
+            Install and restart
+          </button>
+          {" · "}
+          <button type="button" className="linkish" onClick={() => openSettings("about")}>
+            Details
+          </button>
+        </div>
+      )}
+      {updateStatus.kind === "downloading" && (
+        <div className="app-toast update-toast">
+          Downloading update {updateStatus.version}… {updateStatus.progress}%
+        </div>
+      )}
       <aside className="rail" aria-label="Communities">
         {(state?.communities ?? []).map((guild) => {
           const active = guild.id === state?.communityId;
@@ -1715,6 +1771,13 @@ export function App() {
               >
                 Audio
               </button>
+              <button
+                type="button"
+                className={settingsTab === "about" ? "tab active" : "tab"}
+                onClick={() => setSettingsTab("about")}
+              >
+                About
+              </button>
             </div>
             {settingsTab === "profile" ? (
               <ProfileEditor
@@ -1726,7 +1789,7 @@ export function App() {
                 onCancel={() => setSettingsOpen(false)}
                 onSave={saveProfile}
               />
-            ) : (
+            ) : settingsTab === "audio" ? (
               <AudioSettings
                 key={micEpoch}
                 inputId={audioInputId}
@@ -1736,6 +1799,50 @@ export function App() {
                 onOutput={applySpeaker}
                 onClose={() => setSettingsOpen(false)}
               />
+            ) : (
+              <div className="about-settings">
+                <h2>About</h2>
+                <p className="muted">
+                  Chaincord alpha. Updates come from GitHub Releases when a newer installer is
+                  published.
+                </p>
+                <p className="muted">
+                  Status:{" "}
+                  {updateStatus.kind === "idle" && "Not checked yet"}
+                  {updateStatus.kind === "checking" && "Checking…"}
+                  {updateStatus.kind === "up-to-date" && "You are up to date"}
+                  {updateStatus.kind === "available" && `Update ${updateStatus.version} available`}
+                  {updateStatus.kind === "downloading" &&
+                    `Downloading ${updateStatus.version} (${updateStatus.progress}%)`}
+                  {updateStatus.kind === "installing" && "Installing… restarting"}
+                  {updateStatus.kind === "error" && updateStatus.message}
+                </p>
+                {updateStatus.kind === "available" && updateStatus.notes ? (
+                  <pre className="update-notes">{updateStatus.notes}</pre>
+                ) : null}
+                <div className="row gap">
+                  <button
+                    type="button"
+                    disabled={updateBusy || updateStatus.kind === "checking"}
+                    onClick={() => void runUpdateCheck()}
+                  >
+                    Check for updates
+                  </button>
+                  {updateStatus.kind === "available" && (
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={updateBusy}
+                      onClick={() => void runUpdateInstall()}
+                    >
+                      Install and restart
+                    </button>
+                  )}
+                  <button type="button" onClick={() => setSettingsOpen(false)}>
+                    Close
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </div>

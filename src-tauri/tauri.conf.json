@@ -28,6 +28,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
@@ -41,6 +42,14 @@
       "nsis": {
         "installMode": "currentUser"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFNzJGMkJERjY3MTZDQkEKUldTNmJISDJ2Zkp5WGt2UG1sSE55ZXNlVmV3bW1vSVBrNDl5eURpUldJQi9MdDJBNFhRN2tLWmcK",
+      "endpoints": [
+        "https://github.com/heron982/chaincord/releases/latest/download/latest.json"
+      ]
     }
   }
 }

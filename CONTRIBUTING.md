@@ -57,6 +57,20 @@ MLS, erasure-coded history, full SFU (`str0m`), platform MQTT broker, Hamachi-st
 
 Vulnerability reports: do **not** open a public issue — use [SECURITY.md](SECURITY.md).
 
+## Releases and auto-update
+
+Windows installers are built by GitHub Actions on version tags (`v0.1.16`) or via **Actions → Release → Run workflow**.
+
+1. Put the updater **private** key in GitHub → Settings → Secrets:
+   - `TAURI_SIGNING_PRIVATE_KEY` — full contents of your local `.tauri/chaincord.key` (never commit this file)
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — only if the key has a password
+2. Bump `version` in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`
+3. Commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`
+4. The workflow uploads the NSIS setup.exe, `.sig`, and `latest.json` to the GitHub Release
+5. Installed apps check `…/releases/latest/download/latest.json` and offer **Install and restart** (Settings → About)
+
+The **public** key is already in `src-tauri/tauri.conf.json`. If you regenerate keys, update that pubkey and ship a new build — old installs cannot verify updates signed with a new key.
+
 ## Good first issues
 
 Look for GitHub labels `good first issue` and `help wanted`. If none are open yet, small doc fixes, Vitest coverage, and Windows setup clarity are always useful.

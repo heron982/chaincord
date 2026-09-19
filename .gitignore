@@ -14,3 +14,4 @@ copy-result.txt
 *.exe
 *.msi
 *.nsis
+.tauri/

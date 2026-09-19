@@ -220,6 +220,15 @@ pub fn run() {
             append_call_log
         ])
         .setup(|app| {
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_process::init())
+                    .expect("process plugin");
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())
+                    .expect("updater plugin");
+            }
             peer::boot(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

@@ -38,6 +38,8 @@ npm run dist
 
 Default Tauri output: `src-tauri/target/release/bundle/` (NSIS + exe).
 
+Tagged releases (`v*`) build Windows installers in CI and publish updater metadata. See [`CONTRIBUTING.md`](CONTRIBUTING.md#releases-and-auto-update).
+
 ## Quick start
 
 1. Open the app
