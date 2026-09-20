@@ -21,6 +21,34 @@ export function seedingCardVisible(seedActive: boolean): boolean {
   return seedActive;
 }
 
+export type ArchiveStatusKind = "live" | "pendingK" | "lost" | string;
+
+export function archiveBannerVisible(status: ArchiveStatusKind | undefined): boolean {
+  return status === "pendingK" || status === "lost";
+}
+
+export function archiveStatusTitle(status: ArchiveStatusKind | undefined): string {
+  switch (status) {
+    case "pendingK":
+      return "Archive pending";
+    case "lost":
+      return "Archive unavailable";
+    default:
+      return "";
+  }
+}
+
+export function archiveStatusBody(status: ArchiveStatusKind | undefined): string {
+  switch (status) {
+    case "pendingK":
+      return "History shards are incomplete or waiting for members to come online. Chat still works.";
+    case "lost":
+      return "Not enough history shards are known. This part of the past may not come back.";
+    default:
+      return "";
+  }
+}
+
 export function isChatLine(kind: string): boolean {
   return kind === "chat";
 }
@@ -636,11 +664,90 @@ export function looksLikeInvite(raw: string): boolean {
   return /^[A-Za-z0-9+/=_-]{40,}$/.test(extracted);
 }
 
+export type ReachPathKind = "lan" | "mesh" | "public" | "local";
+
+export type ReachPath = {
+  url: string;
+  host: string;
+  kind: ReachPathKind;
+  label: string;
+};
+
+function parseWsHost(url: string): string | null {
+  const m = url.trim().match(/^wss?:\/\/(\[[^\]]+\]|[^/:]+)(?::\d+)?/i);
+  if (!m) return null;
+  return m[1].replace(/^\[|\]$/g, "");
+}
+
+function isIpv4Private(host: string): boolean {
+  const m = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  return false;
+}
+
+function meshVpnLabel(host: string): string | null {
+  const m = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return null;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a === 25) return "Hamachi";
+  if (a === 26) return "Radmin VPN";
+  if (a === 100 && b >= 64 && b <= 127) return "Tailscale";
+  return null;
+}
+
+export function classifyListenUrl(url: string): ReachPath | null {
+  const host = parseWsHost(url);
+  if (!host) return null;
+  if (host === "127.0.0.1" || host === "localhost" || host === "::1") {
+    return { url, host, kind: "local", label: "This PC only" };
+  }
+  const mesh = meshVpnLabel(host);
+  if (mesh) return { url, host, kind: "mesh", label: mesh };
+  if (isIpv4Private(host)) return { url, host, kind: "lan", label: "Local network" };
+  return { url, host, kind: "public", label: "Public IP" };
+}
+
+export function reachabilityFromListenUrls(urls: string[]): {
+  paths: ReachPath[];
+  best: ReachPath | null;
+  hasMesh: boolean;
+  hasLan: boolean;
+  summary: string;
+} {
+  const paths = urls
+    .map(classifyListenUrl)
+    .filter((p): p is ReachPath => Boolean(p && p.kind !== "local"));
+  const hasMesh = paths.some((p) => p.kind === "mesh");
+  const hasLan = paths.some((p) => p.kind === "lan");
+  const best =
+    paths.find((p) => p.kind === "mesh") ||
+    paths.find((p) => p.kind === "lan") ||
+    paths.find((p) => p.kind === "public") ||
+    null;
+  let summary = "No shared path detected yet.";
+  if (hasMesh && best) {
+    summary = `${best.label} detected (${best.host}). Friends on the same VPN can join.`;
+  } else if (hasLan && best) {
+    summary = `Local network detected (${best.host}). Same Wi‑Fi works; for other networks use a mesh VPN first.`;
+  } else if (best?.kind === "public") {
+    summary = `No LAN or mesh VPN path yet. Join the same mesh VPN (Hamachi, Radmin, Tailscale…), then copy a fresh invite.`;
+  }
+  return { paths, best, hasMesh, hasLan, summary };
+}
+
 export function inviteShareText(communityName: string, code: string): string {
   const name = communityName.trim() || "community";
   return [
     `Chaincord invite — ${name}`,
-    "Open the app → Join with invite and paste this:",
+    "Open Chaincord → Join with invite and paste this:",
     code.trim(),
+    "",
+    "If you're not on the same Wi‑Fi: connect to the same mesh VPN (Hamachi, Radmin, Tailscale, …) first, then join.",
   ].join("\n");
 }

@@ -48,6 +48,7 @@ pub struct UiState {
     pub communities: Vec<UiCommunity>,
     pub invite: String,
     pub listen_url: String,
+    pub listen_urls: Vec<String>,
     pub peers: Vec<String>,
     pub text_channels: Vec<String>,
     pub call_rooms: Vec<String>,
@@ -61,6 +62,7 @@ pub struct UiState {
     pub seed_active: bool,
     pub seeding: Vec<String>,
     pub live_call: Option<UiLiveCall>,
+    pub archive_status: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -144,6 +146,11 @@ struct Inner {
     archive_bytes: u64,
     seeded: HashMap<String, u32>,
     seeding: HashSet<String>,
+    archive_status: String,
+    /// blob_id awaiting shard-ack during leave handoff.
+    handoff_wait: Option<(String, String)>,
+    /// peer pk → (blob_id, shard indices they advertised).
+    shard_inventory: HashMap<String, (String, Vec<u8>)>,
 }
 
 pub struct AppState {
@@ -190,6 +197,9 @@ impl AppState {
                 archive_bytes: 0,
                 seeded: HashMap::new(),
                 seeding: HashSet::new(),
+                archive_status: "live".into(),
+                handoff_wait: None,
+                shard_inventory: HashMap::new(),
             }),
             remotes: Mutex::new(HashMap::new()),
             link_pks: Mutex::new(HashMap::new()),
@@ -274,6 +284,7 @@ impl AppState {
                 communities,
                 invite,
                 listen_url: inner.listen_url.clone(),
+                listen_urls: inner.listen_urls.clone(),
                 peers: live_peers,
                 text_channels: session.text_channels.clone(),
                 call_rooms: session.call_rooms.clone(),
@@ -287,6 +298,7 @@ impl AppState {
                 seed_active: false,
                 seeding: Vec::new(),
                 live_call,
+                archive_status: "live".into(),
             };
         }
         let invite = inner.community.as_ref().map(|c| {
@@ -310,6 +322,7 @@ impl AppState {
             communities,
             invite: invite.unwrap_or_default(),
             listen_url: inner.listen_url.clone(),
+            listen_urls: inner.listen_urls.clone(),
             peers: live_peers,
             text_channels: inner.text_channels.clone(),
             call_rooms: inner.call_rooms.clone(),
@@ -327,6 +340,7 @@ impl AppState {
             seed_active: seeding_visible(&inner),
             seeding: inner.seeding.iter().cloned().collect(),
             live_call,
+            archive_status: inner.archive_status.clone(),
         }
     }
 
@@ -662,6 +676,7 @@ fn refresh_archive(app: &AppHandle) {
         let mut inner = state.inner.lock().expect("state");
         inner.archive_messages = 0;
         inner.archive_bytes = 0;
+        inner.archive_status = "live".into();
         return;
     };
     let msgs = {
@@ -675,10 +690,495 @@ fn refresh_archive(app: &AppHandle) {
         .iter()
         .map(|m| (m.text.len() + m.sender.len() + m.channel.len() + 24) as u64)
         .sum();
+    let local_indices: HashSet<u8> = {
+        let guard = state.store.lock().expect("store");
+        let mut set = HashSet::new();
+        if let Some(store) = guard.as_ref() {
+            if let Some((blob, _, _)) = store.archive_meta(&id) {
+                for (i, _) in store.load_shards(&id, &blob) {
+                    set.insert(i);
+                }
+            }
+        }
+        set
+    };
+    let (distinct, holders) = {
+        let inner = state.inner.lock().expect("state");
+        let mut set = local_indices;
+        for (_blob, indices) in inner.shard_inventory.values() {
+            for i in indices {
+                set.insert(*i);
+            }
+        }
+        (set.len(), inner.shard_inventory.len())
+    };
+    let status = crate::erasure::swarm_archive_status(msgs.len(), distinct, holders);
+    let status_s = match status {
+        crate::erasure::ArchiveStatus::Live => "live",
+        crate::erasure::ArchiveStatus::PendingK => "pendingK",
+        crate::erasure::ArchiveStatus::Lost => "lost",
+    };
+    {
+        let mut inner = state.inner.lock().expect("state");
+        inner.archive_messages = msgs.len() as u32;
+        inner.archive_bytes = bytes;
+        inner.archive_status = status_s.into();
+    }
+    rebuild_erasure_archive(app);
+}
+
+fn try_restore_from_shards(app: &AppHandle, community_id: &str, live_key: &str) {
     let state = state_of(app);
-    let mut inner = state.inner.lock().expect("state");
-    inner.archive_messages = msgs.len() as u32;
-    inner.archive_bytes = bytes;
+    let meta = {
+        let guard = state.store.lock().expect("store");
+        guard
+            .as_ref()
+            .and_then(|s| s.archive_meta(community_id))
+    };
+    let Some((blob_id, _, _)) = meta else {
+        return;
+    };
+    let held = {
+        let guard = state.store.lock().expect("store");
+        guard
+            .as_ref()
+            .map(|s| s.load_shards(community_id, &blob_id))
+            .unwrap_or_default()
+    };
+    if held.len() < crate::erasure::DATA_SHARDS {
+        return;
+    }
+    let mut pieces: Vec<Option<Vec<u8>>> = vec![None; crate::erasure::TOTAL_SHARDS];
+    for (index, data) in held {
+        if (index as usize) < pieces.len() {
+            pieces[index as usize] = Some(data);
+        }
+    }
+    let Ok(sealed) = crate::erasure::reconstruct(&mut pieces) else {
+        return;
+    };
+    let Some(plain) = crate::crypto::open_blob(live_key, &sealed) else {
+        return;
+    };
+    let Ok(msgs) = serde_json::from_slice::<Vec<UiMessage>>(&plain) else {
+        return;
+    };
+    {
+        let guard = state.store.lock().expect("store");
+        if let Some(store) = guard.as_ref() {
+            for mut msg in msgs {
+                msg.community_id = community_id.to_string();
+                let _ = store.append_message(community_id, &msg);
+            }
+        }
+    }
+}
+
+fn rebuild_erasure_archive(app: &AppHandle) {
+    let state = state_of(app);
+    let (id, live_key, me, members) = {
+        let inner = state.inner.lock().expect("state");
+        let Some(c) = inner.community.as_ref() else {
+            return;
+        };
+        let mut members: Vec<String> = inner.profiles.keys().cloned().collect();
+        let me = inner.identity.public_hex();
+        if !members.iter().any(|p| p == &me) {
+            members.push(me.clone());
+        }
+        (c.id.clone(), c.live_key.clone(), me, members)
+    };
+    let msgs = {
+        let guard = state.store.lock().expect("store");
+        guard
+            .as_ref()
+            .map(|store| store.load_messages(&id))
+            .unwrap_or_default()
+    };
+    if msgs.is_empty() {
+        try_restore_from_shards(app, &id, &live_key);
+        return;
+    }
+    let plain = match serde_json::to_vec(&msgs) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let Ok(sealed) = crate::crypto::seal_blob(&live_key, &plain) else {
+        return;
+    };
+    let Ok(plan) = crate::erasure::plan_archive(&sealed, &members) else {
+        return;
+    };
+    let keep = crate::erasure::my_shard_indices(&me, &plan.holders);
+    {
+        let guard = state.store.lock().expect("store");
+        if let Some(store) = guard.as_ref() {
+            let _ = store.replace_archive(
+                &id,
+                &plan.blob_id,
+                msgs.len() as u32,
+                &plan.holders,
+                &keep,
+                &plan.shards,
+            );
+        }
+    }
+    advertise_shards(app);
+}
+
+fn send_to_pk(state: &AppState, pk: &str, json: &str) -> bool {
+    let json = stamp_community(state, json);
+    let urls: Vec<String> = {
+        let links = state.link_pks.lock().expect("link_pks");
+        links
+            .iter()
+            .filter(|(_, p)| p.as_str() == pk)
+            .map(|(u, _)| u.clone())
+            .collect()
+    };
+    if urls.is_empty() {
+        return false;
+    }
+    let remotes = state.remotes.lock().expect("remotes");
+    let mut ok = false;
+    for url in urls {
+        if let Some(tx) = remotes.get(&url) {
+            if tx.send(json.clone()).is_ok() {
+                ok = true;
+            }
+        }
+    }
+    ok
+}
+
+fn shard_push_frames(app: &AppHandle, to_pk: &str) -> Result<String, String> {
+    let state = state_of(app);
+    let (id, me) = {
+        let inner = state.inner.lock().expect("state");
+        let id = inner
+            .community
+            .as_ref()
+            .map(|c| c.id.clone())
+            .ok_or_else(|| "not in a community".to_string())?;
+        (id, inner.identity.public_hex())
+    };
+    let (blob_id, _count, holders) = {
+        let guard = state.store.lock().expect("store");
+        guard
+            .as_ref()
+            .and_then(|s| s.archive_meta(&id))
+            .ok_or_else(|| "no archive shards yet".to_string())?
+    };
+    let indices = crate::erasure::my_shard_indices(&me, &holders);
+    if indices.is_empty() {
+        return Ok(blob_id);
+    }
+    let shards = {
+        let guard = state.store.lock().expect("store");
+        guard
+            .as_ref()
+            .map(|s| s.load_shards(&id, &blob_id))
+            .unwrap_or_default()
+    };
+    use base64::Engine;
+    for (index, data) in shards {
+        if !indices.contains(&(index as usize)) {
+            continue;
+        }
+        let frame = serde_json::json!({
+            "type": "shard-push",
+            "blobId": blob_id,
+            "index": index,
+            "data": base64::engine::general_purpose::STANDARD.encode(&data),
+            "from": me,
+            "to": to_pk,
+        })
+        .to_string();
+        if !send_to_pk(&state, to_pk, &frame) {
+            fanout(&state, &frame, None);
+        }
+    }
+    let wait_frame = serde_json::json!({
+        "type": "shard-handoff",
+        "blobId": blob_id,
+        "from": me,
+        "to": to_pk,
+        "holders": holders,
+    })
+    .to_string();
+    if !send_to_pk(&state, to_pk, &wait_frame) {
+        fanout(&state, &wait_frame, None);
+    }
+    {
+        let mut inner = state.inner.lock().expect("state");
+        inner.handoff_wait = Some((blob_id.clone(), to_pk.to_string()));
+    }
+    Ok(blob_id)
+}
+
+fn wait_handoff_ack(app: &AppHandle, blob_id: &str, timeout_ms: u64) -> bool {
+    let start = std::time::Instant::now();
+    while (start.elapsed().as_millis() as u64) < timeout_ms {
+        {
+            let state = state_of(app);
+            let inner = state.inner.lock().expect("state");
+            if inner.handoff_wait.is_none() {
+                return true;
+            }
+            if inner
+                .handoff_wait
+                .as_ref()
+                .is_some_and(|(b, _)| b != blob_id)
+            {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+fn online_member_pks(state: &AppState) -> Vec<String> {
+    let me = state.inner.lock().expect("state").identity.public_hex();
+    let mut out: HashSet<String> = HashSet::new();
+    {
+        let inner = state.inner.lock().expect("state");
+        for (pk, p) in &inner.profiles {
+            if pk != &me && p.status != "offline" {
+                out.insert(pk.clone());
+            }
+        }
+    }
+    {
+        let links = state.link_pks.lock().expect("link_pks");
+        for pk in links.values() {
+            if pk != &me {
+                out.insert(pk.clone());
+            }
+        }
+    }
+    let mut list: Vec<String> = out.into_iter().collect();
+    list.sort();
+    list
+}
+
+fn local_held_indices(state: &AppState) -> (String, String, Vec<u8>) {
+    let id = state
+        .inner
+        .lock()
+        .expect("state")
+        .community
+        .as_ref()
+        .map(|c| c.id.clone())
+        .unwrap_or_default();
+    if id.is_empty() {
+        return (String::new(), String::new(), Vec::new());
+    }
+    let guard = state.store.lock().expect("store");
+    let Some(store) = guard.as_ref() else {
+        return (id, String::new(), Vec::new());
+    };
+    let Some((blob, _, _)) = store.archive_meta(&id) else {
+        return (id, String::new(), Vec::new());
+    };
+    let mut indices: Vec<u8> = store
+        .load_shards(&id, &blob)
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    (id, blob, indices)
+}
+
+fn shard_have_json(state: &AppState) -> Option<String> {
+    let (id, blob, indices) = local_held_indices(state);
+    if id.is_empty() || blob.is_empty() || indices.is_empty() {
+        return None;
+    }
+    let me = state.inner.lock().expect("state").identity.public_hex();
+    Some(
+        serde_json::json!({
+            "type": "shard-have",
+            "blobId": blob,
+            "indices": indices,
+            "publicKey": me,
+            "ts": now_ms(),
+        })
+        .to_string(),
+    )
+}
+
+fn advertise_shards(app: &AppHandle) {
+    let state = state_of(app);
+    if let Some(json) = shard_have_json(&state) {
+        fanout(&state, &json, None);
+    }
+}
+
+fn push_shard_indices(app: &AppHandle, to_pk: &str, blob_id: &str, indices: &[u8]) {
+    if to_pk.is_empty() || indices.is_empty() {
+        return;
+    }
+    let state = state_of(app);
+    let id = state
+        .inner
+        .lock()
+        .expect("state")
+        .community
+        .as_ref()
+        .map(|c| c.id.clone());
+    let Some(id) = id else {
+        return;
+    };
+    let me = state.inner.lock().expect("state").identity.public_hex();
+    let shards = {
+        let guard = state.store.lock().expect("store");
+        guard
+            .as_ref()
+            .map(|s| s.load_shards(&id, blob_id))
+            .unwrap_or_default()
+    };
+    use base64::Engine;
+    let want: HashSet<u8> = indices.iter().copied().collect();
+    for (index, data) in shards {
+        if !want.contains(&index) {
+            continue;
+        }
+        let frame = serde_json::json!({
+            "type": "shard-push",
+            "blobId": blob_id,
+            "index": index,
+            "data": base64::engine::general_purpose::STANDARD.encode(&data),
+            "from": me,
+            "to": to_pk,
+        })
+        .to_string();
+        if !send_to_pk(&state, to_pk, &frame) {
+            fanout(&state, &frame, None);
+        }
+    }
+}
+
+fn request_shards(app: &AppHandle, to_pk: &str, blob_id: &str, indices: &[u8]) {
+    if indices.is_empty() {
+        return;
+    }
+    let state = state_of(app);
+    let me = state.inner.lock().expect("state").identity.public_hex();
+    let frame = serde_json::json!({
+        "type": "shard-need",
+        "blobId": blob_id,
+        "indices": indices,
+        "publicKey": me,
+        "to": to_pk,
+        "ts": now_ms(),
+    })
+    .to_string();
+    if !send_to_pk(&state, to_pk, &frame) {
+        fanout(&state, &frame, None);
+    }
+}
+
+fn reconcile_shards(app: &AppHandle) {
+    let state = state_of(app);
+    let (blob, mine) = {
+        let (_id, blob, indices) = local_held_indices(&state);
+        (blob, indices)
+    };
+    if blob.is_empty() {
+        return;
+    }
+    let inventory: Vec<(String, String, Vec<u8>)> = {
+        let inner = state.inner.lock().expect("state");
+        inner
+            .shard_inventory
+            .iter()
+            .map(|(pk, (b, idx))| (pk.clone(), b.clone(), idx.clone()))
+            .collect()
+    };
+    for (pk, their_blob, their_idx) in inventory {
+        if their_blob != blob {
+            continue;
+        }
+        let need = crate::erasure::indices_to_pull(&mine, &their_idx);
+        if !need.is_empty() {
+            request_shards(app, &pk, &blob, &need);
+        }
+    }
+    repair_under_replicated(app);
+}
+
+fn repair_under_replicated(app: &AppHandle) {
+    let state = state_of(app);
+    let online = online_member_pks(&state);
+    let (blob, mine) = {
+        let (_id, blob, indices) = local_held_indices(&state);
+        (blob, indices)
+    };
+    if blob.is_empty() {
+        return;
+    }
+    let me = state.inner.lock().expect("state").identity.public_hex();
+    let inv_map: HashMap<String, Vec<u8>> = {
+        let inner = state.inner.lock().expect("state");
+        inner
+            .shard_inventory
+            .iter()
+            .filter(|(_, (b, _))| b == &blob)
+            .map(|(pk, (_, idx))| (pk.clone(), idx.clone()))
+            .collect()
+    };
+    let mut copies = vec![0usize; crate::erasure::TOTAL_SHARDS];
+    for i in &mine {
+        if (*i as usize) < copies.len() {
+            copies[*i as usize] += 1;
+        }
+    }
+    for idx in inv_map.values() {
+        for i in idx {
+            if (*i as usize) < copies.len() {
+                copies[*i as usize] += 1;
+            }
+        }
+    }
+    let online_n = online.len() + 1; // include self
+    let weak = crate::erasure::under_replicated(
+        &copies,
+        online_n,
+        crate::erasure::MIN_ONLINE_REPLICAS,
+    );
+    for i in weak {
+        let i_u8 = i as u8;
+        if mine.contains(&i_u8) {
+            if let Some(target) =
+                crate::erasure::pick_repair_target(&me, &online, &inv_map, i)
+            {
+                push_shard_indices(app, &target, &blob, &[i_u8]);
+            }
+            continue;
+        }
+        // Ask anyone who advertised it.
+        for (pk, idx) in &inv_map {
+            if idx.contains(&i_u8) {
+                request_shards(app, pk, &blob, &[i_u8]);
+                break;
+            }
+        }
+    }
+}
+
+fn forget_peer_shards(app: &AppHandle, pk: &str) {
+    if pk.is_empty() {
+        return;
+    }
+    {
+        let state = state_of(app);
+        let mut inner = state.inner.lock().expect("state");
+        inner.shard_inventory.remove(pk);
+    }
+    repair_under_replicated(app);
+    refresh_archive(app);
 }
 
 fn seed_progress(inner: &Inner) -> (u64, u64) {
@@ -815,6 +1315,9 @@ fn apply_session(inner: &mut Inner, session: crate::store::Session) {
     inner.seeding.clear();
     inner.archive_messages = 0;
     inner.archive_bytes = 0;
+    inner.archive_status = "live".into();
+    inner.handoff_wait = None;
+    inner.shard_inventory.clear();
     if inner.text_channels.is_empty() {
         inner.text_channels.push("general".into());
     }
@@ -836,6 +1339,9 @@ fn unload_community(inner: &mut Inner) {
     inner.seeding.clear();
     inner.archive_messages = 0;
     inner.archive_bytes = 0;
+    inner.archive_status = "live".into();
+    inner.handoff_wait = None;
+    inner.shard_inventory.clear();
     inner.voice.clear();
 }
 
@@ -928,8 +1434,10 @@ pub fn boot(app: &AppHandle) {
 fn spawn_presence_pulse(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(8));
+        let mut n = 0u32;
         loop {
             tick.tick().await;
+            n = n.wrapping_add(1);
             let state = state_of(&app);
             let (in_community, in_voice) = {
                 let inner = state.inner.lock().expect("state");
@@ -944,11 +1452,29 @@ fn spawn_presence_pulse(app: AppHandle) {
             }
             let json = presence_json(&state);
             fanout(&state, &json, None);
-            let leaves = {
+            let (leaves, stale): (Vec<(String, String)>, Vec<String>) = {
                 let mut inner = state.inner.lock().expect("state");
-                expire_stale_presence(&mut inner, now_ms())
+                let leaves = expire_stale_presence(&mut inner, now_ms());
+                let me = inner.identity.public_hex();
+                let offline: Vec<String> = inner
+                    .profiles
+                    .iter()
+                    .filter(|(pk, p)| *pk.as_str() != me && p.status == "offline")
+                    .map(|(pk, _)| pk.clone())
+                    .collect();
+                for pk in &offline {
+                    inner.shard_inventory.remove(pk);
+                }
+                (leaves, offline)
             };
             fanout_voice_leaves(&state, &leaves);
+            if !stale.is_empty() || !leaves.is_empty() {
+                repair_under_replicated(&app);
+            }
+            if n % 3 == 0 {
+                advertise_shards(&app);
+                reconcile_shards(&app);
+            }
             emit_state(&app);
         }
     });
@@ -987,9 +1513,7 @@ fn usable_v4(v4: Ipv4Addr) -> bool {
         return false;
     }
     let o = v4.octets();
-    if o[0] == 26 {
-        return false;
-    }
+    // Hyper-V default switch — not a path friends can use.
     if o[0] == 192 && o[1] == 168 && o[2] == 137 {
         return false;
     }
@@ -1083,7 +1607,6 @@ fn is_cgnat_v4(ip: Ipv4Addr) -> bool {
     o[0] == 100 && (64..128).contains(&o[1])
 }
 
-#[allow(dead_code)]
 fn same_home_lan(a: Ipv4Addr, b: Ipv4Addr) -> bool {
     let ao = a.octets();
     let bo = b.octets();
@@ -1117,7 +1640,8 @@ fn should_dial(url: &str) -> bool {
 
 fn invite_peer_list(inner: &Inner) -> Vec<String> {
     // Loopback in an invite makes the other person dial themselves.
-    // LAN + public (when NAT discovery already ran) are the useful ones.
+    // WAN path is BYO mesh VPN only — never put a public IP in the invite.
+    // Order: home LAN → mesh VPN (Hamachi/Radmin/Tailscale).
     let own = unique_urls(
         inner
             .listen_urls
@@ -1127,12 +1651,66 @@ fn invite_peer_list(inner: &Inner) -> Vec<String> {
     )
     .into_iter()
     .filter(|u| {
-        should_dial(u) && parse_ws(u).is_some_and(|(h, _)| !is_loopback_host(&h))
+        should_dial(u)
+            && parse_ws(u).is_some_and(|(h, _)| {
+                !is_loopback_host(&h) && (is_private_host(&h) || is_mesh_vpn_host(&h))
+            })
     })
     .collect::<Vec<_>>();
-    let mut peers = prefer_non_loopback(own);
+    let mut peers = prefer_reachability_order(prefer_non_loopback(own));
     peers.truncate(3);
     peers
+}
+
+fn is_private_host(host: &str) -> bool {
+    if let Ok(v4) = host.parse::<Ipv4Addr>() {
+        return v4.is_private() || v4.is_link_local();
+    }
+    if let Ok(v6) = host.parse::<Ipv6Addr>() {
+        let s = v6.segments();
+        // Unique local fc00::/7
+        return s[0] & 0xfe00 == 0xfc00;
+    }
+    false
+}
+
+/// Free mesh VPNs users often run beside Chaincord (BYO VPN).
+fn is_mesh_vpn_v4(v4: Ipv4Addr) -> bool {
+    let o = v4.octets();
+    // Hamachi 25.0.0.0/8
+    if o[0] == 25 {
+        return true;
+    }
+    // Radmin VPN 26.0.0.0/8
+    if o[0] == 26 {
+        return true;
+    }
+    // Tailscale / similar CGNAT 100.64.0.0/10
+    is_cgnat_v4(v4)
+}
+
+fn is_mesh_vpn_host(host: &str) -> bool {
+    host.parse::<Ipv4Addr>()
+        .ok()
+        .is_some_and(is_mesh_vpn_v4)
+}
+
+fn prefer_reachability_order(urls: Vec<String>) -> Vec<String> {
+    let mut lan = Vec::new();
+    let mut mesh = Vec::new();
+    for url in urls {
+        let Some((host, _)) = parse_ws(&url) else {
+            continue;
+        };
+        if is_private_host(&host) {
+            lan.push(url);
+        } else if is_mesh_vpn_host(&host) {
+            mesh.push(url);
+        }
+        // Public / unknown hosts are never dialed from invites.
+    }
+    lan.extend(mesh);
+    lan
 }
 
 fn unique_urls(urls: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -1443,6 +2021,9 @@ pub(crate) fn handshake_messages(app: &AppHandle, compact: bool) -> Vec<String> 
                 out.push(hist);
             }
         }
+        if let Some(have) = shard_have_json(&state) {
+            out.push(have);
+        }
         return out;
     }
     out.push(presence_json(&state));
@@ -1450,6 +2031,9 @@ pub(crate) fn handshake_messages(app: &AppHandle, compact: bool) -> Vec<String> 
     out.push(history_request_json(&state));
     if let (_, _, Some(hist)) = history_payload(&state) {
         out.push(hist);
+    }
+    if let Some(have) = shard_have_json(&state) {
+        out.push(have);
     }
     out
 }
@@ -2382,6 +2966,8 @@ fn handle_remote(
             fanout(&state, &presence_json(&state), None);
             fanout(&state, &presence_state_json(&state), None);
             maybe_seed_peer(app, &hello_pk, their_history);
+            advertise_shards(app);
+            reconcile_shards(app);
             let our_count = state
                 .inner
                 .lock()
@@ -2527,6 +3113,9 @@ fn handle_remote(
                     .map(|room| (json_str(frame.get("publicKey")), room))
                     .collect::<Vec<_>>()
             };
+            if status == Some("offline") && !pk.is_empty() {
+                forget_peer_shards(app, &pk);
+            }
             emit_state(app);
             persist_session(app);
             fanout(&state, raw, from_url.as_deref());
@@ -2610,6 +3199,161 @@ fn handle_remote(
             }
             refresh_archive(app);
             emit_state(app);
+        }
+        "shard-push" => {
+            let me = state.inner.lock().expect("state").identity.public_hex();
+            let to = json_str(frame.get("to"));
+            if !to.is_empty() && to != me {
+                fanout(&state, raw, from_url.as_deref());
+                return;
+            }
+            let blob_id = json_str(frame.get("blobId"));
+            let from = json_str(frame.get("from"));
+            let index = frame.get("index").and_then(|v| v.as_u64()).unwrap_or(99) as u8;
+            let data_b64 = json_str(frame.get("data"));
+            use base64::Engine;
+            let Ok(data) = base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes())
+            else {
+                return;
+            };
+            if blob_id.is_empty() || index as usize >= crate::erasure::TOTAL_SHARDS {
+                return;
+            }
+            {
+                let guard = state.store.lock().expect("store");
+                if let Some(store) = guard.as_ref() {
+                    let _ = store.put_shard(&live_id, &blob_id, index, &data);
+                }
+            }
+            {
+                let mut inner = state.inner.lock().expect("state");
+                if let Some(entry) = inner.shard_inventory.get_mut(&from) {
+                    if entry.0 == blob_id && !entry.1.contains(&index) {
+                        entry.1.push(index);
+                        entry.1.sort_unstable();
+                    }
+                } else if !from.is_empty() {
+                    inner
+                        .shard_inventory
+                        .insert(from.clone(), (blob_id.clone(), vec![index]));
+                }
+            }
+            let ack = serde_json::json!({
+                "type": "shard-ack",
+                "blobId": blob_id,
+                "index": index,
+                "from": me,
+                "to": from,
+            })
+            .to_string();
+            if !from.is_empty() {
+                let _ = send_to_pk(&state, &from, &ack);
+            } else {
+                fanout(&state, &ack, None);
+            }
+            refresh_archive(app);
+            emit_state(app);
+            advertise_shards(app);
+        }
+        "shard-handoff" => {
+            let me = state.inner.lock().expect("state").identity.public_hex();
+            let to = json_str(frame.get("to"));
+            if !to.is_empty() && to != me {
+                fanout(&state, raw, from_url.as_deref());
+                return;
+            }
+            let blob_id = json_str(frame.get("blobId"));
+            let from = json_str(frame.get("from"));
+            let holders: Vec<String> = frame
+                .get("holders")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            if !blob_id.is_empty() && !holders.is_empty() {
+                let guard = state.store.lock().expect("store");
+                if let Some(store) = guard.as_ref() {
+                    let _ = store.set_archive_holders(&live_id, &blob_id, &holders);
+                }
+            }
+            // Ack the whole handoff so leaver can proceed.
+            let ack = serde_json::json!({
+                "type": "shard-ack",
+                "blobId": blob_id,
+                "index": 255,
+                "from": me,
+                "to": from,
+                "handoff": true,
+            })
+            .to_string();
+            if !from.is_empty() {
+                let _ = send_to_pk(&state, &from, &ack);
+            } else {
+                fanout(&state, &ack, None);
+            }
+        }
+        "shard-ack" => {
+            let me = state.inner.lock().expect("state").identity.public_hex();
+            let to = json_str(frame.get("to"));
+            if !to.is_empty() && to != me {
+                fanout(&state, raw, from_url.as_deref());
+                return;
+            }
+            let blob_id = json_str(frame.get("blobId"));
+            let from = json_str(frame.get("from"));
+            let mut inner = state.inner.lock().expect("state");
+            if let Some((wait_blob, wait_pk)) = inner.handoff_wait.clone() {
+                if wait_blob == blob_id && (from.is_empty() || from == wait_pk) {
+                    inner.handoff_wait = None;
+                }
+            }
+        }
+        "shard-have" => {
+            let pk = json_str(frame.get("publicKey"));
+            let blob_id = json_str(frame.get("blobId"));
+            let me = state.inner.lock().expect("state").identity.public_hex();
+            if pk.is_empty() || pk == me || blob_id.is_empty() {
+                return;
+            }
+            let indices: Vec<u8> = frame
+                .get("indices")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            {
+                let mut inner = state.inner.lock().expect("state");
+                inner
+                    .shard_inventory
+                    .insert(pk.clone(), (blob_id.clone(), indices.clone()));
+            }
+            remember_link_pk(&state, from_url.as_deref(), &pk);
+            let (_id, my_blob, mine) = local_held_indices(&state);
+            if my_blob == blob_id || my_blob.is_empty() {
+                let need = crate::erasure::indices_to_pull(&mine, &indices);
+                if !need.is_empty() {
+                    request_shards(app, &pk, &blob_id, &need);
+                }
+            }
+            advertise_shards(app);
+            repair_under_replicated(app);
+            refresh_archive(app);
+            emit_state(app);
+            fanout(&state, raw, from_url.as_deref());
+        }
+        "shard-need" => {
+            let me = state.inner.lock().expect("state").identity.public_hex();
+            let to = json_str(frame.get("to"));
+            let from = json_str(frame.get("publicKey"));
+            if !to.is_empty() && to != me {
+                fanout(&state, raw, from_url.as_deref());
+                return;
+            }
+            let blob_id = json_str(frame.get("blobId"));
+            let indices: Vec<u8> = frame
+                .get("indices")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            if from.is_empty() || blob_id.is_empty() || indices.is_empty() {
+                return;
+            }
+            push_shard_indices(app, &from, &blob_id, &indices);
         }
         _ => {}
     }
@@ -3114,18 +3858,24 @@ pub fn leave_call(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub fn leave_community(app: &AppHandle) {
+pub fn leave_community(app: &AppHandle, force: bool) -> Result<(), String> {
     let state = state_of(app);
-    let (live_id, viewed_id, in_call) = {
+    let (live_id, viewed_id, in_call, me, owner) = {
         let inner = state.inner.lock().expect("state");
         (
             inner.community.as_ref().map(|c| c.id.clone()),
             viewed_community_id(&inner),
             seated_in_call(&inner),
+            inner.identity.public_hex(),
+            inner
+                .community
+                .as_ref()
+                .map(|c| c.genesis.owner.clone())
+                .unwrap_or_default(),
         )
     };
     let Some(leaving_id) = viewed_id else {
-        return;
+        return Ok(());
     };
     if in_call && live_id.as_deref() != Some(leaving_id.as_str()) {
         clear_stored_community(app, &leaving_id);
@@ -3134,8 +3884,35 @@ pub fn leave_community(app: &AppHandle) {
             inner.viewed_id = None;
         }
         emit_state(app);
-        return;
+        return Ok(());
     }
+
+    let online = online_member_pks(&state);
+    if !force && !online.is_empty() {
+        let need = {
+            let guard = state.store.lock().expect("store");
+            guard
+                .as_ref()
+                .and_then(|s| s.archive_meta(&leaving_id))
+                .map(|(_, _, holders)| crate::erasure::handoff_indices(&me, &holders, &online))
+                .unwrap_or_default()
+        };
+        if !need.is_empty() {
+            let Some(target) = crate::erasure::pick_handoff_target(&me, &owner, &online) else {
+                return Err(
+                    "No online peer to take your history shards. Leave anyway to risk the archive."
+                        .into(),
+                );
+            };
+            let blob_id = shard_push_frames(app, &target)?;
+            if !wait_handoff_ack(app, &blob_id, 4_000) {
+                // Target may still have the bytes; continue leave but warn via status.
+                let mut inner = state.inner.lock().expect("state");
+                inner.handoff_wait = None;
+            }
+        }
+    }
+
     let leaves = {
         let mut inner = state.inner.lock().expect("state");
         inner.status = "offline".into();
@@ -3164,7 +3941,7 @@ pub fn leave_community(app: &AppHandle) {
         activate_loaded(app, session, true);
         let mut inner = state.inner.lock().expect("state");
         inner.status = "online".into();
-        return;
+        return Ok(());
     }
     {
         let mut inner = state.inner.lock().expect("state");
@@ -3179,6 +3956,7 @@ pub fn leave_community(app: &AppHandle) {
     }
     bump_links(&state);
     emit_state(app);
+    Ok(())
 }
 
 fn profile_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -3270,6 +4048,9 @@ mod tests {
             archive_bytes: 0,
             seeded: HashMap::new(),
             seeding: HashSet::new(),
+            archive_status: "live".into(),
+            handoff_wait: None,
+            shard_inventory: HashMap::new(),
         }
     }
 
@@ -3718,18 +4499,21 @@ mod tests {
     }
 
     #[test]
-    fn hamachi_and_hyperv_are_not_usable() {
-        assert!(!usable_v4(Ipv4Addr::new(26, 1, 2, 3)));
+    fn hyperv_switch_is_not_usable_but_mesh_vpns_are() {
         assert!(!usable_v4(Ipv4Addr::new(192, 168, 137, 10)));
         assert!(usable_v4(Ipv4Addr::new(192, 168, 100, 10)));
+        assert!(usable_v4(Ipv4Addr::new(25, 12, 34, 56))); // Hamachi
+        assert!(usable_v4(Ipv4Addr::new(26, 1, 2, 3))); // Radmin
+        assert!(usable_v4(Ipv4Addr::new(100, 64, 1, 2))); // Tailscale
         assert!(!usable_v6("2001:0:53aa:64c:0:5efe:c0a8:6401".parse().unwrap()));
         assert!(!usable_v6("2002:c0a8:1::1".parse().unwrap()));
     }
 
     #[test]
     fn should_not_dial_junk_adapters() {
-        assert!(!should_dial("ws://26.12.34.56:7340"));
         assert!(!should_dial("ws://192.168.137.1:7340"));
+        assert!(should_dial("ws://26.12.34.56:7340"));
+        assert!(should_dial("ws://25.1.2.3:7340"));
         assert!(should_dial("ws://127.0.0.1:7340"));
         assert!(should_dial("ws://192.168.1.9:7340"));
         assert!(should_dial("ws://203.0.113.10:7340"));
@@ -3747,6 +4531,42 @@ mod tests {
         assert_eq!(
             invite_peer_list(&inner),
             vec!["ws://192.168.100.2:7340".to_string()]
+        );
+    }
+
+    #[test]
+    fn invite_omits_public_ip() {
+        let mut inner = sample_inner();
+        inner.listen_port = 7340;
+        inner.listen_url = "ws://192.168.100.2:7340".into();
+        inner.listen_urls = vec![
+            "ws://203.0.113.10:7340".into(),
+            "ws://192.168.100.2:7340".into(),
+        ];
+        assert_eq!(
+            invite_peer_list(&inner),
+            vec!["ws://192.168.100.2:7340".to_string()]
+        );
+    }
+
+    #[test]
+    fn invite_lists_mesh_vpn_and_omits_public_ip() {
+        let mut inner = sample_inner();
+        inner.listen_port = 7340;
+        inner.listen_url = "ws://26.10.0.2:7340".into();
+        inner.listen_urls = vec![
+            "ws://203.0.113.10:7340".into(),
+            "ws://26.10.0.2:7340".into(),
+            "ws://25.1.2.3:7340".into(),
+            "ws://192.168.1.9:7340".into(),
+        ];
+        assert_eq!(
+            invite_peer_list(&inner),
+            vec![
+                "ws://192.168.1.9:7340".to_string(),
+                "ws://26.10.0.2:7340".to_string(),
+                "ws://25.1.2.3:7340".to_string(),
+            ]
         );
     }
 

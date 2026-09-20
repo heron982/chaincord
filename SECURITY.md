@@ -5,14 +5,14 @@ Chaincord is **alpha**. Do not use it for data you would not put in a group whos
 ## What holds today
 
 - The live channel key travels **in the invite**. Anyone with the invite can read the chat.
-- There is no Chaincord MQTT broker. Whoever **creates** the community hosts the hub in their app; the invite carries the `ws://` address. Joiners do not configure anything. If the creator is unreachable (NAT without a port / no VPS), cross-network chat does not come up. LAN and direct P2P still work. The topic includes `community_id`; the hub sees metadata, not plaintext (when the invite key is correct).
-- `CHAINCORD_RELAY=off` disables the MQTT client in this process. `CHAINCORD_RELAY=wss://…` at create time replaces the local hub with an external broker.
+- There is no Chaincord MQTT broker and no default public broker. Whoever **creates** the community hosts the hub in their app; the invite carries LAN or mesh-VPN `ws://` addresses only (no public IP). Joiners do not configure anything. Without the same Wi‑Fi or the same mesh VPN, cross-network chat does not come up. The topic includes `community_id`; the hub sees metadata, not plaintext (when the invite key is correct).
+- `CHAINCORD_RELAY=off` disables the MQTT client in this process. `CHAINCORD_RELAY=wss://…` at create time replaces the local hub with an external broker you run yourself.
 - TURN `openrelay.metered.ca` and public STUN exist only so 1:1 calls can traverse NAT. They are not production infrastructure.
 - The target design (MLS, erasure, blind node, community SFU) lives in [`docs/architecture.md`](docs/architecture.md) and is **not in the binary** yet. Group calls today use an elected **HUB:N** WebRTC peer, not a full SFU.
 
 ## Own relay
 
-There is no relay field in the UI. The desktop that creates the community is already the hub. For internet use, that machine must accept TCP on the app port (LAN, VPS, or opened port).
+There is no relay field in the UI. The desktop that creates the community is already the hub. Cross-network use means everyone is on the same mesh VPN; the hub listens on that virtual LAN.
 
 ## Reporting a vulnerability
 

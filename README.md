@@ -9,7 +9,8 @@ This is an **alpha** desktop chat. The live channel key still travels in the inv
 ## What works today
 
 - Create a community or join with an invite
-- Chat in `#general` on the LAN; across networks if the creator’s PC is reachable (their app is the MQTT relay)
+- Chat in `#general` on the LAN; across networks via a mesh VPN you choose (Hamachi, Radmin, Tailscale, …)
+- History: local cache plus Reed-Solomon shards among members; leave can hand off your shards to an online peer
 - Voice/video call: **1:1** is direct WebRTC; **3+** uses an elected **HUB:N** peer (not a full SFU product yet). CGNAT may fail until you run your own TURN
 - Two clients on one PC: open the app twice (the second instance picks another port)
 
@@ -46,4 +47,4 @@ Tagged releases (`v*`) build Windows installers in CI and publish updater metada
 2. **Create** a community or **Join** with an invite
 3. Chat in `#general`
 
-Same Wi-Fi: the invite already carries the LAN IP. Different networks: the creator’s app is the relay — both peers reach that machine.
+Same Wi-Fi: the invite already carries the LAN IP. Different networks: join the same mesh VPN (Hamachi, Radmin, Tailscale, …), keep the creator’s app open, then share a fresh invite. Invites never advertise a public IP.

@@ -15,6 +15,7 @@ export type UiState = {
   communities: UiCommunity[];
   invite: string;
   listenUrl: string;
+  listenUrls?: string[];
   peers: string[];
   textChannels: string[];
   callRooms: string[];
@@ -28,6 +29,7 @@ export type UiState = {
   seedActive: boolean;
   seeding: string[];
   liveCall: UiLiveCall | null;
+  archiveStatus?: "live" | "pendingK" | "lost" | string;
 };
 
 export type UiLiveCall = {
@@ -77,8 +79,8 @@ export async function backendChat(text: string, channel: string): Promise<void> 
   await invoke("send_chat", { text, channel });
 }
 
-export async function backendLeave(): Promise<void> {
-  await invoke("leave_community");
+export async function backendLeave(force = false): Promise<void> {
+  await invoke("leave_community", { force });
 }
 
 export async function backendAddRoom(kind: "text" | "call", name: string): Promise<void> {

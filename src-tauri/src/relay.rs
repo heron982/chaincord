@@ -123,6 +123,7 @@ pub fn choose_for_create(custom: Option<&str>) -> Result<Vec<String>, String> {
     match std::env::var("CHAINCORD_RELAY") {
         Ok(url) if relay_off(&url) => Ok(Vec::new()),
         Ok(url) if !url.trim().is_empty() => Ok(vec![parse_one(&url)?]),
+        // Empty → creator-hosted hub (own listen URLs become the relay in create_local).
         _ => Ok(Vec::new()),
     }
 }

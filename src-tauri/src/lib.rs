@@ -1,4 +1,5 @@
 mod crypto;
+mod erasure;
 mod log;
 mod nat;
 mod peer;
@@ -137,9 +138,8 @@ async fn rtc_share_screen(on: bool, app: tauri::AppHandle) -> Result<(), String>
 }
 
 #[tauri::command]
-fn leave_community(app: tauri::AppHandle) -> Result<(), String> {
-    peer::leave_community(&app);
-    Ok(())
+fn leave_community(force: Option<bool>, app: tauri::AppHandle) -> Result<(), String> {
+    peer::leave_community(&app, force.unwrap_or(false))
 }
 
 #[tauri::command]

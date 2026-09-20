@@ -379,6 +379,32 @@ pub fn open_chat(live_key: &str, msg: &WireMessage) -> Option<ChatPlain> {
     serde_json::from_slice(&body).ok()
 }
 
+/// Encrypt an opaque archive blob with the community live key (nonce ‖ ciphertext).
+pub fn seal_blob(live_key: &str, plain: &[u8]) -> Result<Vec<u8>, String> {
+    let nonce_bytes = random_bytes(24);
+    let key = hex_to_32(live_key)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let nonce = XNonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plain)
+        .map_err(|_| "failed to seal archive".to_string())?;
+    let mut out = Vec::with_capacity(24 + ciphertext.len());
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+pub fn open_blob(live_key: &str, packed: &[u8]) -> Option<Vec<u8>> {
+    if packed.len() < 24 {
+        return None;
+    }
+    let (nonce, ciphertext) = packed.split_at(24);
+    let key = hex_to_32(live_key).ok()?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let nonce_arr = XNonce::from_slice(nonce);
+    cipher.decrypt(nonce_arr, ciphertext).ok()
+}
+
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

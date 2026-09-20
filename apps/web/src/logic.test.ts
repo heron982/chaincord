@@ -10,6 +10,8 @@ import {
   looksLikeInvite,
   inviteShareText,
   extractInvite,
+  classifyListenUrl,
+  reachabilityFromListenUrls,
   keepCallFocus,
   pickCallFocus,
   autoCallFocusIds,
@@ -30,6 +32,9 @@ import {
   webkitSafeIceUrl,
   seedPercent,
   seedingCardVisible,
+  archiveBannerVisible,
+  archiveStatusTitle,
+  archiveStatusBody,
   shouldHealSend,
   canPublishLocalSdp,
   shouldResendCallAnswer,
@@ -71,6 +76,22 @@ describe("seeding card", () => {
     expect(seedPercent(1, 1)).toBe(100);
     expect(seedPercent(400, 800)).toBe(50);
     expect(seedPercent(0, 0)).toBe(0);
+  });
+});
+
+describe("archive status banner", () => {
+  it("shows pending and lost only", () => {
+    expect(archiveBannerVisible("live")).toBe(false);
+    expect(archiveBannerVisible(undefined)).toBe(false);
+    expect(archiveBannerVisible("pendingK")).toBe(true);
+    expect(archiveBannerVisible("lost")).toBe(true);
+  });
+
+  it("uses distinct copy for pending vs lost", () => {
+    expect(archiveStatusTitle("pendingK")).toContain("pending");
+    expect(archiveStatusBody("pendingK").toLowerCase()).toContain("shards");
+    expect(archiveStatusTitle("lost")).toContain("unavailable");
+    expect(archiveStatusBody("lost").toLowerCase()).toContain("enough");
   });
 });
 
@@ -568,5 +589,27 @@ describe("call negotiation", () => {
     expect(text).toContain("Equipe");
     expect(text).toContain("cc/abc");
     expect(text).toContain("Join with invite");
+    expect(text.toLowerCase()).toContain("vpn");
+  });
+
+  it("classifies mesh VPN listen URLs for the share UI", () => {
+    expect(classifyListenUrl("ws://26.1.2.3:7340")?.label).toBe("Radmin VPN");
+    expect(classifyListenUrl("ws://25.9.8.7:7340")?.label).toBe("Hamachi");
+    expect(classifyListenUrl("ws://100.64.1.2:7340")?.label).toBe("Tailscale");
+    const reach = reachabilityFromListenUrls([
+      "ws://127.0.0.1:7340",
+      "ws://192.168.0.10:7340",
+      "ws://26.1.2.3:7340",
+    ]);
+    expect(reach.hasMesh).toBe(true);
+    expect(reach.best?.label).toBe("Radmin VPN");
+    expect(reach.summary).toContain("Radmin");
+  });
+
+  it("tells users to use mesh VPN when only a public IP is visible", () => {
+    const reach = reachabilityFromListenUrls(["ws://203.0.113.10:7340"]);
+    expect(reach.best?.kind).toBe("public");
+    expect(reach.summary.toLowerCase()).toContain("mesh vpn");
+    expect(reach.summary.toLowerCase()).not.toContain("open port");
   });
 });

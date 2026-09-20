@@ -16,7 +16,7 @@ When something is decided in conversation, it goes into Definitions and into the
 |---|---|---|
 | Chat transport | Creator-hosted MQTT hub in the app; invite carries `ws://` | Same idea; optional member `--node` later |
 | Channel crypto | Live key **in the invite** (not MLS) | OpenMLS + history keys |
-| History | Local SQLite cache; no erasure pool | Erasure among members; pending/lost UI states |
+| History | Local SQLite cache + erasure shards; leave handoff; wake-up gossip + crash under-replication repair; pending/lost UI | Same + richer auto-repair when nobody holds a copy |
 | Call 2 people | Direct WebRTC (+ public STUN/TURN OpenRelay) | Same + community coturn |
 | Call 3+ | Elected **HUB:N** WebRTC peer (forwards media); prefer **non-owner**, then stable sorted key | Full desktop SFU (`str0m`) with capability tests |
 | Platform broker | None | None (def. 24) |
@@ -73,7 +73,7 @@ Implication 18: do not promise “joined, read 2019” without keys or *k* stora
 21. **MVP stack (target):** Rust core (identity, log, MLS, erasure, sync, desktop SFU); desktop UI **Tauri 2 + React/TS**; cache **SQLite**; chat **WebSocket** (QUIC later); 1:1 call **WebRTC**; embedded SFU **`str0m`**; NAT **coturn**; erasure **`reed-solomon-erasure`**; group E2EE **OpenMLS**; identity **ed25519-dalek** + `did:key`. Same Rust binary with `--node` for 24h VPS/PC. Light mobile later (UniFFI). Out of v1: Electron, DHT/libp2p, Matrix fork, LiveKit/mediasoup as product, crypto in the UI.
 22. **Every community client is a history node, not live-message-only.** Joining the guild = joining that community’s erasure *n* (encrypted shards). There is no “I only chat, disk is someone else’s problem.” What is **not** fixed: a single device owning the archive (owner / first to open is **not** *the* server). The archive is the set of clients. Per-device quota (phone stores less than desktop); leave handoff still applies (def. 20). Without recoverable *k* shards, history is pending/lost (def. 18). Live chat does not wait on the archive.
 23. **P2P between clients stays; the platform does not host a middlebox to hide IPs.** Community is for people you trust — invites are not for anyone. A member (or a leaked invite) can see network addresses and hassle others’ connections; that is the price of not being central Discord. Warn in the UI; do not add a Chaincord gateway. A member’s `--node` is still allowed; Felipe is not obliged to run infra to “fix” P2P.
-24. **MQTT relay belongs to the community.** Whoever creates **hosts the hub in their own app** (same port as P2P). The invite carries those `ws://` URLs. No HiveMQ/EMQX/Mosquitto and no URL field. Joiners only paste the invite. Without the creator reachable on the internet (LAN, VPS, opened port), WAN does not come up — LAN/direct P2P still works. `CHAINCORD_RELAY` is local override only. Call TURN is a separate cable.
+24. **MQTT relay belongs to the community.** Whoever creates **hosts the hub in their own app** (same port as P2P). The invite carries LAN or mesh-VPN `ws://` URLs only (Hamachi / Radmin / Tailscale / same Wi‑Fi) — never a public IP. No HiveMQ/EMQX/Mosquitto and no URL field. Joiners only paste the invite. Without the creator reachable on that shared LAN (real or simulated), WAN does not come up. `CHAINCORD_RELAY` is local override only. Call TURN is a separate cable.
 
 ### Hypothesis (not locked)
 

@@ -447,6 +447,62 @@ button, input, textarea { font: inherit; }
   line-height: 1.45;
 }
 .alone-hint strong { color: var(--text, #f2f3f5); font-weight: 600; }
+.alone-hint .linkish {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  color: var(--accent, #5865f2);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.invite-steps {
+  margin: 0 0 12px;
+  padding-left: 1.2em;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.invite-steps li { margin: 0 0 6px; }
+.reach-pill {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  background: #2b2d31;
+  color: var(--muted);
+}
+.reach-pill.ok { background: color-mix(in srgb, #3ba55d 18%, #2b2d31); color: #b7ebc6; }
+.reach-pill.lan { background: #2b2d31; }
+.reach-pill.warn { background: color-mix(in srgb, #faa61a 16%, #2b2d31); color: #f3d39a; }
+.hub-paths {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.hub-paths li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--muted);
+}
+.hub-paths .hub-kind {
+  min-width: 7.5em;
+  color: var(--text, #f2f3f5);
+  font-weight: 600;
+}
+.hub-paths code {
+  font-size: 12px;
+  color: var(--muted);
+}
 .pad { padding: 8px; }
 .tile-face {
   width: 80px; height: 80px; border-radius: 50%; overflow: hidden;
@@ -786,6 +842,29 @@ button.ghost { background: transparent; color: var(--muted); }
   transition: width 0.25s ease;
 }
 .seed-card .muted { font-size: 11px; }
+
+.archive-card {
+  padding: 8px 10px 10px;
+  background: #232428;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.archive-card-head {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #f0b232;
+}
+.archive-card.lost .archive-card-head {
+  color: #f23f42;
+}
+.archive-card .muted {
+  font-size: 11px;
+  line-height: 1.35;
+  margin: 0;
+}
 
 .user-panel {
   display: flex; align-items: center; gap: 4px;

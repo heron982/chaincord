@@ -31,6 +31,7 @@ import {
   inviteShareText,
   extractInvite,
   looksLikeInvite,
+  reachabilityFromListenUrls,
   pickCallFocus,
   autoCallFocusIds,
   toggleCallFocus,
@@ -43,6 +44,9 @@ import {
   remoteVideoVisible,
   screenTileId,
   seedPercent,
+  archiveBannerVisible,
+  archiveStatusTitle,
+  archiveStatusBody,
   userTileId,
   wantsCallMedia,
   voiceRoomSharing,
@@ -396,6 +400,13 @@ export function App() {
   const otherPeers = Math.max(liveLinks, otherMembers);
   const peerCount = otherPeers + (inCommunity ? 1 : 0);
   const alone = inCommunity && otherPeers === 0;
+  const reach = useMemo(() => {
+    const urls = [
+      ...(state?.listenUrls ?? []),
+      ...(state?.listenUrl ? [state.listenUrl] : []),
+    ];
+    return reachabilityFromListenUrls(urls);
+  }, [state?.listenUrl, state?.listenUrls]);
   const textChannels = state?.textChannels?.length ? state.textChannels : inCommunity ? ["general"] : [];
   const callRooms = [...new Set(state?.callRooms ?? [])];
   const voice = state?.liveCall?.communityId === state?.communityId
@@ -695,10 +706,10 @@ export function App() {
     }
   };
 
-  const onLeave = async () => {
+  const onLeave = async (force = false) => {
     try {
       stopMedia();
-      await backendLeave();
+      await backendLeave(force);
       setLines([]);
       setLeaveOpen(false);
       setDraft("");
@@ -1193,6 +1204,9 @@ export function App() {
             total={state.seedTotal ?? 1}
           />
         )}
+        {inCommunity && archiveBannerVisible(state?.archiveStatus) && (
+          <ArchiveCard status={state?.archiveStatus ?? "pendingK"} />
+        )}
         {state?.displayName && (
           <UserPanel
             name={state.displayName}
@@ -1468,9 +1482,14 @@ export function App() {
         <aside className="members-pane" aria-label="Members">
           {alone && (
             <p className="alone-hint">
-              <strong>Just you for now.</strong> Copy the invite from the community menu and send it.
-              Both people need the app open. Over the internet, your PC must accept incoming
-              connections (same network, VPS, or open port).
+              <strong>Just you for now.</strong>{" "}
+              <button type="button" className="linkish" onClick={() => setShareOpen(true)}>
+                Copy invite
+              </button>{" "}
+              and send it. Both keep Chaincord open.
+              {reach.hasMesh
+                ? ` ${reach.best?.label ?? "VPN"} is on — friends on that network can join.`
+                : " Different house? Connect the same mesh VPN (Hamachi, Radmin, Tailscale…), then copy a fresh invite."}
             </p>
           )}
           {PRESENCE_GROUPS.map((group) => {
@@ -1572,8 +1591,9 @@ export function App() {
                   />
                 </label>
                 <p className="field-hint">
-                  After that you copy an invite. New members don't configure a server — the
-                  creator's app is the relay when their machine accepts connections.
+                  After that you copy an invite. Same Wi‑Fi works as-is. For friends elsewhere, join
+                  a mesh VPN together first (Hamachi, Radmin, Tailscale, …) — Chaincord uses that
+                  path automatically.
                 </p>
                 {addError && <p className="form-error">{addError}</p>}
                 <div className="row">
@@ -1644,17 +1664,36 @@ export function App() {
         >
           <div className="panel invite-share" onClick={(e) => e.stopPropagation()}>
             <h2>Invite to {state.communityName}</h2>
-            <p>
-              Send this message. Recipients open Chaincord, go to{" "}
-              <b>Join with invite</b>, and paste.
+            <ol className="invite-steps">
+              <li>Friends install Chaincord.</li>
+              <li>
+                Same Wi‑Fi: skip ahead. Different networks: join the same mesh VPN first (Hamachi,
+                Radmin, Tailscale…).
+              </li>
+              <li>
+                They open <b>Join with invite</b> and paste your message.
+              </li>
+            </ol>
+            <p className={`reach-pill ${reach.hasMesh ? "ok" : reach.hasLan ? "lan" : "warn"}`}>
+              {reach.summary}
             </p>
+            {reach.paths.length > 0 && (
+              <ul className="hub-paths" aria-label="Addresses in this invite">
+                {reach.paths.slice(0, 3).map((p) => (
+                  <li key={p.url}>
+                    <span className="hub-kind">{p.label}</span>
+                    <code>{p.host}</code>
+                  </li>
+                ))}
+              </ul>
+            )}
             <pre className="invite-preview">{inviteShareText(state.communityName, state.invite)}</pre>
             <code className="invite-code" title="Click to select">
               {state.invite}
             </code>
             <p className="field-hint">
-              Keep the app open. Same network is enough. From another network, your PC must accept
-              incoming connections.
+              Keep Chaincord open. If you connected a VPN after creating the community, copy again so
+              the invite includes that address.
             </p>
             <div className="row">
               <button type="button" onClick={() => void copyInvite("message")}>
@@ -1713,11 +1752,11 @@ export function App() {
             {alone ? (
               <>
                 <p>
-                  You're the only member online in this community. Leaving removes only it from this
-                  device; other communities in the sidebar stay.
+                  You're the only member online. Leaving removes this community from this device.
+                  History shards stay only here until someone else joins.
                 </p>
                 <div className="row">
-                  <button type="button" onClick={() => void onLeave()}>
+                  <button type="button" onClick={() => void onLeave(true)}>
                     Leave
                   </button>
                   <button type="button" className="ghost" onClick={() => setLeaveOpen(false)}>
@@ -1728,14 +1767,15 @@ export function App() {
             ) : (
               <>
                 <p>
-                  {otherPeers} other member(s) are here. In the full product, leaving finishes after
-                  handing off your history slice (default 20). Handoff is not wired in this MVP yet.
+                  {otherPeers} other member(s) are here. Transfer and leave hands your history shards
+                  to another online peer (erasure handoff). Leave anyway skips that and may risk the
+                  archive.
                 </p>
                 <div className="row">
-                  <button type="button" disabled>
+                  <button type="button" onClick={() => void onLeave(false)}>
                     Transfer and leave
                   </button>
-                  <button type="button" className="secondary" onClick={() => void onLeave()}>
+                  <button type="button" className="secondary" onClick={() => void onLeave(true)}>
                     Leave anyway
                   </button>
                   <button type="button" className="ghost" onClick={() => setLeaveOpen(false)}>
@@ -2014,6 +2054,16 @@ function SeedCard({
         {fmtBytes(Math.min(sent, total))} of {fmtBytes(total)}
         {messages > 0 ? ` · ${messages} msg` : ""}
       </span>
+    </div>
+  );
+}
+
+function ArchiveCard({ status }: { status: string }) {
+  const lost = status === "lost";
+  return (
+    <div className={lost ? "archive-card lost" : "archive-card"} role="status">
+      <div className="archive-card-head">{archiveStatusTitle(status)}</div>
+      <p className="muted">{archiveStatusBody(status)}</p>
     </div>
   );
 }

@@ -80,6 +80,7 @@ impl Store {
         };
         store.migrate_v2()?;
         store.migrate_v3()?;
+        store.migrate_v4()?;
         Ok(store)
     }
 
@@ -195,6 +196,181 @@ impl Store {
         if self.schema_version() < 3 {
             self.set_schema_version(3)?;
         }
+        Ok(())
+    }
+
+    fn migrate_v4(&self) -> Result<(), String> {
+        {
+            let conn = self.conn.lock().expect("store");
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS archive_meta (
+                    community_id TEXT PRIMARY KEY,
+                    blob_id TEXT NOT NULL,
+                    msg_count INTEGER NOT NULL DEFAULT 0,
+                    holders TEXT NOT NULL DEFAULT '[]'
+                );
+                CREATE TABLE IF NOT EXISTS shards (
+                    community_id TEXT NOT NULL,
+                    blob_id TEXT NOT NULL,
+                    shard_index INTEGER NOT NULL,
+                    data BLOB NOT NULL,
+                    PRIMARY KEY (community_id, blob_id, shard_index)
+                );
+                CREATE INDEX IF NOT EXISTS shards_community
+                    ON shards (community_id, blob_id);
+                ",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if self.schema_version() < 4 {
+            self.set_schema_version(4)?;
+        }
+        Ok(())
+    }
+
+    pub fn replace_archive(
+        &self,
+        community_id: &str,
+        blob_id: &str,
+        msg_count: u32,
+        holders: &[String],
+        keep_indices: &[usize],
+        shards: &[Vec<u8>],
+    ) -> Result<(), String> {
+        let holders_json = serde_json::to_string(holders).map_err(|e| e.to_string())?;
+        let conn = self.conn.lock().expect("store");
+        conn.execute(
+            "DELETE FROM shards WHERE community_id = ?1",
+            params![community_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO archive_meta(community_id, blob_id, msg_count, holders)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![community_id, blob_id, msg_count as i64, holders_json],
+        )
+        .map_err(|e| e.to_string())?;
+        for &i in keep_indices {
+            let Some(data) = shards.get(i) else {
+                continue;
+            };
+            conn.execute(
+                "INSERT OR REPLACE INTO shards(community_id, blob_id, shard_index, data)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![community_id, blob_id, i as i64, data],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn set_archive_holders(
+        &self,
+        community_id: &str,
+        blob_id: &str,
+        holders: &[String],
+    ) -> Result<(), String> {
+        let holders_json = serde_json::to_string(holders).map_err(|e| e.to_string())?;
+        let conn = self.conn.lock().expect("store");
+        let msg_count: i64 = conn
+            .query_row(
+                "SELECT msg_count FROM archive_meta WHERE community_id = ?1",
+                params![community_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT OR REPLACE INTO archive_meta(community_id, blob_id, msg_count, holders)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![community_id, blob_id, msg_count, holders_json],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn put_shard(
+        &self,
+        community_id: &str,
+        blob_id: &str,
+        index: u8,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().expect("store");
+        conn.execute(
+            "INSERT OR REPLACE INTO shards(community_id, blob_id, shard_index, data)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![community_id, blob_id, index as i64, data],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn load_shards(
+        &self,
+        community_id: &str,
+        blob_id: &str,
+    ) -> Vec<(u8, Vec<u8>)> {
+        let conn = self.conn.lock().expect("store");
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT shard_index, data FROM shards
+             WHERE community_id = ?1 AND blob_id = ?2
+             ORDER BY shard_index ASC",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(params![community_id, blob_id], |row| {
+            Ok((row.get::<_, i64>(0)? as u8, row.get::<_, Vec<u8>>(1)?))
+        });
+        match rows {
+            Ok(iter) => iter.flatten().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub fn archive_meta(&self, community_id: &str) -> Option<(String, u32, Vec<String>)> {
+        let conn = self.conn.lock().expect("store");
+        let row = conn
+            .query_row(
+                "SELECT blob_id, msg_count, holders FROM archive_meta WHERE community_id = ?1",
+                params![community_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)? as u32,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        let holders: Vec<String> = serde_json::from_str(&row.2).unwrap_or_default();
+        Some((row.0, row.1, holders))
+    }
+
+    pub fn shard_count(&self, community_id: &str) -> u32 {
+        let conn = self.conn.lock().expect("store");
+        conn.query_row(
+            "SELECT COUNT(*) FROM shards WHERE community_id = ?1",
+            params![community_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as u32
+    }
+
+    pub fn clear_archive(&self, community_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().expect("store");
+        conn.execute(
+            "DELETE FROM shards WHERE community_id = ?1",
+            params![community_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM archive_meta WHERE community_id = ?1",
+            params![community_id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -582,6 +758,16 @@ impl Store {
         .map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM messages WHERE community_id = ?1",
+            params![community_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM shards WHERE community_id = ?1",
+            params![community_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM archive_meta WHERE community_id = ?1",
             params![community_id],
         )
         .map_err(|e| e.to_string())?;
