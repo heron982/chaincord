@@ -1927,10 +1927,18 @@ mod tests {
 
     #[test]
     fn star_leaves_only_dial_the_hub() {
-        let others = vec!["bb".into(), "cc".into()];
-        assert_eq!(wanted_peers("aa", &others, Some("aa")), others);
-        assert_eq!(wanted_peers("bb", &others, Some("aa")), vec!["aa".to_string()]);
-        assert_eq!(forward_peers("aa", "bb", "aa", &others), vec!["cc".to_string()]);
+        // `others` is everyone except me (same as sync()), not the full roster.
+        let for_hub = vec!["bb".into(), "cc".into()];
+        assert_eq!(wanted_peers("aa", &for_hub, Some("aa")), for_hub);
+        let for_leaf = vec!["aa".into(), "cc".into()];
+        assert_eq!(
+            wanted_peers("bb", &for_leaf, Some("aa")),
+            vec!["aa".to_string()]
+        );
+        assert_eq!(
+            forward_peers("aa", "bb", "aa", &for_hub),
+            vec!["cc".to_string()]
+        );
         assert_eq!(slot_peer(4, "aa", &["cc".into()]), "cc");
     }
 }
