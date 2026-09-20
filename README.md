@@ -2,7 +2,7 @@
 
 Decentralized live chat (**alpha**). Communities, channels, E2EE in the design — the binary is still an MVP.
 
-Architecture notebook: [`docs/architecture.md`](docs/architecture.md). License: [Apache-2.0](LICENSE). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Architecture notebook: [`docs/architecture.md`](docs/architecture.md). **How to use (Wi‑Fi / VPN):** [`docs/tutorial.md`](docs/tutorial.md). License: [Apache-2.0](LICENSE). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 This is an **alpha** desktop chat. The live channel key still travels in the invite; do not treat it as production E2EE. See [`SECURITY.md`](SECURITY.md).
 
@@ -48,3 +48,5 @@ Tagged releases (`v*`) build Windows installers in CI and publish updater metada
 3. Chat in `#general`
 
 Same Wi-Fi: the invite already carries the LAN IP. Different networks: join the same mesh VPN (Hamachi, Radmin, Tailscale, …), keep the creator’s app open, then share a fresh invite. Invites never advertise a public IP.
+
+Step-by-step (install, same Wi‑Fi, VPN checklist): [`docs/tutorial.md`](docs/tutorial.md).
